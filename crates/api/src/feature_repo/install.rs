@@ -93,7 +93,7 @@ pub async fn status(pool: &PgPool) -> ApiResult<Value> {
     }))
 }
 
-pub async fn refresh(pool: &PgPool) -> ApiResult<Value> {
+pub async fn refresh(pool: &PgPool, config: &AppConfig) -> ApiResult<Value> {
     let client = fetch::build_client()?;
     let mut refreshed = Vec::new();
     let mut errors = Vec::new();
@@ -131,10 +131,22 @@ pub async fn refresh(pool: &PgPool) -> ApiResult<Value> {
         }
     };
 
+    let artifact_sync = match sync_installed_artifact_cache(pool, config).await {
+        Ok(result) => result,
+        Err(error) => {
+            tracing::warn!(error = %error, "refresh could not sync mirrored artifacts");
+            serde_json::json!({
+                "mirrored": 0,
+                "errors": [api_error_message(&error)],
+            })
+        }
+    };
+
     Ok(serde_json::json!({
         "refreshed": refreshed,
         "errors": errors,
         "update_signatures_synced": signature_updates,
+        "artifact_sync": artifact_sync,
     }))
 }
 
@@ -800,6 +812,176 @@ async fn fetch_signed_file(
     Ok(bytes)
 }
 
+/// Mirror any missing or stale artifacts for installed features (same pinned version).
+pub async fn sync_installed_artifact_cache(
+    pool: &PgPool,
+    config: &AppConfig,
+) -> ApiResult<Value> {
+    let client = fetch::build_client()?;
+    let installed: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT id, pinned_version, source_id FROM installed_features ORDER BY id",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut mirrored = 0u64;
+    let mut unchanged = 0u64;
+    let mut errors = Vec::new();
+
+    for (feature_id, pinned_version, source_id) in installed {
+        let source = match sources::get(pool, &source_id).await {
+            Ok(source) if source.enabled => source,
+            Ok(_) => continue,
+            Err(error) => {
+                errors.push(serde_json::json!({
+                    "feature_id": feature_id,
+                    "error": api_error_message(&error),
+                }));
+                continue;
+            }
+        };
+        let catalogue = match fetch_catalogue(&client, &source).await {
+            Ok(catalogue) => catalogue,
+            Err(error) => {
+                errors.push(serde_json::json!({
+                    "feature_id": feature_id,
+                    "error": api_error_message(&error),
+                }));
+                continue;
+            }
+        };
+        let Some(feature) = catalogue
+            .index
+            .features
+            .iter()
+            .find(|entry| entry.id == feature_id)
+        else {
+            continue;
+        };
+        let Some(version) = feature
+            .versions
+            .iter()
+            .find(|entry| entry.version == pinned_version)
+        else {
+            continue;
+        };
+        let manifest_path = normalize_manifest_path(&version.manifest);
+        let manifest_bytes = match fetch_signed_file(
+            &client,
+            &catalogue,
+            &manifest_path,
+            METADATA_MAX_BYTES,
+            false,
+        )
+        .await
+        {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                errors.push(serde_json::json!({
+                    "feature_id": feature_id,
+                    "error": api_error_message(&error),
+                }));
+                continue;
+            }
+        };
+        let manifest: FeatureManifest = match serde_json::from_slice(&manifest_bytes) {
+            Ok(manifest) => manifest,
+            Err(error) => {
+                errors.push(serde_json::json!({
+                    "feature_id": feature_id,
+                    "error": format!("invalid feature manifest: {error}"),
+                }));
+                continue;
+            }
+        };
+        let before = count_cached_artifacts(pool, &feature_id, &pinned_version).await?;
+        match mirror_artifacts(pool, config, &client, &catalogue, &manifest).await {
+            Ok(()) => {
+                let after = count_cached_artifacts(pool, &feature_id, &pinned_version).await?;
+                if after > before {
+                    mirrored += after - before;
+                } else {
+                    unchanged += manifest.artifacts.len() as u64;
+                }
+            }
+            Err(error) => errors.push(serde_json::json!({
+                "feature_id": feature_id,
+                "error": api_error_message(&error),
+            })),
+        }
+    }
+
+    Ok(serde_json::json!({
+        "mirrored": mirrored,
+        "unchanged": unchanged,
+        "errors": errors,
+    }))
+}
+
+async fn count_cached_artifacts(
+    pool: &PgPool,
+    feature_id: &str,
+    version: &str,
+) -> ApiResult<u64> {
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::bigint FROM feature_artifact_cache
+         WHERE feature_id = $1 AND version = $2",
+    )
+    .bind(feature_id)
+    .bind(version)
+    .fetch_one(pool)
+    .await?;
+    Ok(count.max(0) as u64)
+}
+
+async fn cached_artifact_is_current(
+    pool: &PgPool,
+    manifest: &FeatureManifest,
+    artifact: &FeatureArtifact,
+) -> ApiResult<bool> {
+    let row: Option<(String, String)> = sqlx::query_as(
+        "SELECT sha256, local_path FROM feature_artifact_cache
+         WHERE feature_id = $1 AND version = $2 AND os = $3 AND arch = $4",
+    )
+    .bind(&manifest.id)
+    .bind(&manifest.version)
+    .bind(&artifact.os)
+    .bind(&artifact.arch)
+    .fetch_optional(pool)
+    .await?;
+
+    let Some((cached_sha256, local_path)) = row else {
+        return Ok(false);
+    };
+    if cached_sha256.to_ascii_lowercase() != artifact.sha256.to_ascii_lowercase() {
+        return Ok(false);
+    }
+    Ok(tokio::fs::try_exists(&local_path).await.unwrap_or(false))
+}
+
+async fn write_mirrored_file(path: &Path, bytes: &[u8]) -> ApiResult<()> {
+    use tokio::io::AsyncWriteExt;
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)
+        .await
+        .map_err(|error| {
+            ApiError::Internal(anyhow::anyhow!(
+                "failed to write mirrored artifact {}: {error}",
+                path.display()
+            ))
+        })?;
+    file.write_all(bytes).await.map_err(|error| {
+        ApiError::Internal(anyhow::anyhow!(
+            "failed to write mirrored artifact {}: {error}",
+            path.display()
+        ))
+    })?;
+    Ok(())
+}
+
 async fn mirror_artifacts(
     pool: &PgPool,
     config: &AppConfig,
@@ -808,6 +990,10 @@ async fn mirror_artifacts(
     manifest: &FeatureManifest,
 ) -> ApiResult<()> {
     for artifact in &manifest.artifacts {
+        if cached_artifact_is_current(pool, manifest, artifact).await? {
+            continue;
+        }
+
         let relative_path = artifact_relative_path(manifest, artifact)?;
         let bytes =
             fetch_signed_file(client, catalogue, &relative_path, ARTIFACT_MAX_BYTES, false).await?;
@@ -840,40 +1026,12 @@ async fn mirror_artifacts(
                 ))
             })?;
         let local_path = directory.join(filename);
-        let mut file = tokio::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&local_path)
-            .await
-            .map_err(|error| {
-                ApiError::Internal(anyhow::anyhow!(
-                    "failed to create mirrored artifact {}: {error}",
-                    local_path.display()
-                ))
-            })?;
-        use tokio::io::AsyncWriteExt;
-        file.write_all(&bytes).await.map_err(|error| {
-            ApiError::Internal(anyhow::anyhow!(
-                "failed to write mirrored artifact {}: {error}",
-                local_path.display()
-            ))
-        })?;
-        drop(file);
-        let mut sig_file = tokio::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(local_path.with_file_name(format!("{filename}.sig")))
-            .await
-            .map_err(|error| {
-                ApiError::Internal(anyhow::anyhow!(
-                    "failed to create mirrored artifact signature: {error}"
-                ))
-            })?;
-        sig_file.write_all(&signature).await.map_err(|error| {
-            ApiError::Internal(anyhow::anyhow!(
-                "failed to write mirrored artifact signature: {error}"
-            ))
-        })?;
+        write_mirrored_file(&local_path, &bytes).await?;
+        write_mirrored_file(
+            &local_path.with_file_name(format!("{filename}.sig")),
+            &signature,
+        )
+        .await?;
 
         sqlx::query(
             "INSERT INTO feature_artifact_cache

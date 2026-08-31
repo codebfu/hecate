@@ -485,7 +485,7 @@ pub async fn execute_repo_command(
         }
         "admin.repo.list" => feature_repo::install::list(pool).await,
         "admin.repo.status" => feature_repo::install::status(pool).await,
-        "admin.repo.refresh" => feature_repo::install::refresh(pool).await,
+        "admin.repo.refresh" => feature_repo::install::refresh(pool, config).await,
         "admin.repo.install" => {
             let id = required_string_param(&params, "id")?;
             let version = optional_string_param(&params, "version")?;

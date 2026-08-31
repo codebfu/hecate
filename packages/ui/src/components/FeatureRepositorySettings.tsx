@@ -437,8 +437,9 @@ export function FeatureRepositorySettings() {
         <div>
           <h2>Feature catalogue</h2>
           <p className="muted">
-            Refresh only reloads catalogue metadata. Upgrade all pulls the newest version for
-            installs that track latest (pins are skipped).
+            Refresh re-fetches catalogue metadata and mirrors any missing installer packages for
+            installed features. Upgrade all pulls the newest version for installs that track latest
+            (pins are skipped).
           </p>
         </div>
         <div className="actions" style={{ marginTop: 0 }}>
