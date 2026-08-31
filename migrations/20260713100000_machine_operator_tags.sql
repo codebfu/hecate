@@ -1,0 +1,1 @@
+ALTER TABLE machines ADD COLUMN IF NOT EXISTS operator_tags TEXT[] NOT NULL DEFAULT '{}';

@@ -1,0 +1,19 @@
+# Copyright (C) 2026 Gaultier HUBERT
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Optional reverse proxy (docker compose --profile proxy).
+# HTTPS only — plaintext :80 is intentionally not configured.
+# Mount TLS material at /etc/caddy/tls (see ansible Caddyfile / docs/install.md).
+
+:443 {
+	tls /etc/caddy/tls/cert.pem /etc/caddy/tls/key.pem
+	header Strict-Transport-Security "max-age=31536000; includeSubDomains"
+
+	handle /mcp* {
+		reverse_proxy mcp:3100
+	}
+
+	handle {
+		reverse_proxy api:8080
+	}
+}

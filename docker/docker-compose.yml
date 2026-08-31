@@ -1,0 +1,93 @@
+# Copyright (C) 2026 Gaultier HUBERT
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: hecate
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-hecate}
+      POSTGRES_DB: hecate
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hecate -d hecate"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: runtime
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://hecate:${POSTGRES_PASSWORD:-hecate}@postgres:5432/hecate
+      HECATE_ENV: ${HECATE_ENV:-development}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:8080,http://127.0.0.1:8080}
+      ALLOW_INSECURE_DEV: ${ALLOW_INSECURE_DEV:-1}
+      SESSION_SECRET: ${SESSION_SECRET:-dev-session-secret-change-me}
+      API_KEY_PEPPER: ${API_KEY_PEPPER:-dev-api-pepper-change-me}
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN:-dev-internal-token-change-me}
+      HECATE_TASK_SIGNING_MASTER_KEY: ${HECATE_TASK_SIGNING_MASTER_KEY:-k1:0000000000000000000000000000000000000000000000000000000000000000}
+      WEBAUTHN_RP_ID: ${WEBAUTHN_RP_ID:-localhost}
+      WEBAUTHN_RP_ORIGIN: ${WEBAUTHN_RP_ORIGIN:-http://localhost:8080}
+      BIND_ADDR: 0.0.0.0:8080
+      RUST_LOG: ${RUST_LOG:-info}
+    ports:
+      # Dev default: loopback. Override API_BIND_ADDR=0.0.0.0 only on trusted hosts.
+      - "${API_BIND_ADDR:-127.0.0.1}:${API_PORT:-8080}:8080"
+    networks:
+      - internal
+      - frontend
+
+  mcp:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: mcp-runtime
+    depends_on:
+      - api
+    environment:
+      MCP_HOST: 0.0.0.0
+      MCP_PORT: "3100"
+      HECATE_API_URL: http://api:8080
+      HECATE_INTERNAL_TOKEN: ${INTERNAL_TOKEN:-dev-internal-token-change-me}
+      MCP_ALLOWED_HOSTS: ${MCP_ALLOWED_HOSTS:-127.0.0.1,localhost,[::1],mcp}
+      HECATE_PUBLIC_BASE_URL: ${HECATE_PUBLIC_BASE_URL:-}
+    # Local/dev only: bind to loopback so MCP is not reachable from the LAN/internet.
+    # Production (Ansible-deployed) compose has no published port for `mcp` at all —
+    # it is reached only via the `caddy` reverse proxy on the internal `frontend`
+    # network. Do not publish this port on a host with a public IP.
+    ports:
+      - "${MCP_BIND_ADDR:-127.0.0.1}:${MCP_PORT:-3100}:3100"
+    networks:
+      - frontend
+
+  caddy:
+    image: caddy:2-alpine
+    profiles: ["proxy"]
+    depends_on:
+      - api
+      - mcp
+    ports:
+      - "${HTTPS_PORT:-443}:443"
+    volumes:
+      - ${HECATE_TLS_DIR:-./tls}:/etc/caddy/tls:ro
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    networks:
+      - frontend
+
+networks:
+  internal:
+    internal: true
+  frontend:
+    driver: bridge
+
+volumes:
+  pgdata:

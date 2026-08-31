@@ -1,0 +1,1 @@
+{"version":3,"file":"untrusted.d.ts","sourceRoot":"","sources":["../../src/tools/untrusted.ts"],"names":[],"mappings":"AAGA;;;GAGG;AACH,wBAAgB,yBAAyB,CACvC,QAAQ,EAAE,OAAO,EACjB,eAAe,EAAE,OAAO,GACvB;IAAE,OAAO,EAAE,KAAK,CAAC;QAAE,IAAI,EAAE,MAAM,CAAC;QAAC,IAAI,EAAE,MAAM,CAAA;KAAE,CAAC,CAAA;CAAE,CAyBpD"}

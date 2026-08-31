@@ -1,0 +1,93 @@
+# Copyright (C) 2026 Gaultier HUBERT
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# Production compose using published GHCR images.
+# Usage: docker compose -f docker/docker-compose.prod.yml --env-file docker/.env.example up -d
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: hecate
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: hecate
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hecate -d hecate"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  api:
+    image: ${HECATE_API_IMAGE:-ghcr.io/codebfu/hecate:1.0.0}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://hecate:${POSTGRES_PASSWORD}@postgres:5432/hecate
+      HECATE_ENV: ${HECATE_ENV:-production}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS}
+      SESSION_SECRET: ${SESSION_SECRET}
+      API_KEY_PEPPER: ${API_KEY_PEPPER}
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN}
+      HECATE_TASK_SIGNING_MASTER_KEY: ${HECATE_TASK_SIGNING_MASTER_KEY}
+      WEBAUTHN_RP_ID: ${WEBAUTHN_RP_ID}
+      WEBAUTHN_RP_ORIGIN: ${WEBAUTHN_RP_ORIGIN}
+      BIND_ADDR: 0.0.0.0:8080
+      RUST_LOG: ${RUST_LOG:-info}
+      RELEASE_SIGNING_PUBLIC_KEY_B64: ${RELEASE_SIGNING_PUBLIC_KEY_B64}
+      HECATE_REPO_URL: ${HECATE_REPO_URL:-https://repo.hecate-mcp.com}
+      HECATE_APP_TAG: ${HECATE_APP_TAG:-1.0.0}
+    ports:
+      # Loopback only — terminate TLS in front (Caddy profile or host proxy).
+      - "${API_BIND_ADDR:-127.0.0.1}:${API_PORT:-8080}:8080"
+    networks:
+      - internal
+      - frontend
+    restart: unless-stopped
+
+  mcp:
+    image: ${HECATE_MCP_IMAGE:-ghcr.io/codebfu/hecate-mcp:1.0.0}
+    depends_on:
+      - api
+    environment:
+      MCP_HOST: 0.0.0.0
+      MCP_PORT: "3100"
+      HECATE_API_URL: http://api:8080
+      HECATE_INTERNAL_TOKEN: ${INTERNAL_TOKEN}
+      MCP_ALLOWED_HOSTS: ${MCP_ALLOWED_HOSTS:-127.0.0.1,localhost,[::1],mcp}
+      HECATE_PUBLIC_BASE_URL: ${HECATE_PUBLIC_BASE_URL:-}
+    # Loopback only — put a reverse proxy in front for internet exposure.
+    ports:
+      - "${MCP_BIND_ADDR:-127.0.0.1}:${MCP_PORT:-3100}:3100"
+    networks:
+      - frontend
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2-alpine
+    profiles: ["proxy"]
+    depends_on:
+      - api
+      - mcp
+    ports:
+      - "${HTTPS_PORT:-443}:443"
+    volumes:
+      - ${HECATE_TLS_DIR:-./tls}:/etc/caddy/tls:ro
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    networks:
+      - frontend
+    restart: unless-stopped
+
+networks:
+  internal:
+    internal: true
+  frontend:
+    driver: bridge
+
+volumes:
+  pgdata:

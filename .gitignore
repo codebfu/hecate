@@ -1,0 +1,9 @@
+/target/
+node_modules/
+/dist/
+packages/ui/dist/
+!.env.example
+.cursor/
+*.swp
+.env
+.env.*

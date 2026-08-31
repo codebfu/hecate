@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Hecate">
+  <defs>
+    <radialGradient id="glow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="40%" stop-color="#6ea8fe"/>
+      <stop offset="100%" stop-color="#6ea8fe" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="512" height="512" rx="96" fill="#0f1419"/>
+  <circle cx="256" cy="256" r="72" fill="url(#glow)" opacity="0.85"/>
+  <circle cx="256" cy="256" r="26" fill="#ffffff"/>
+  <g fill="none" stroke="#6ea8fe" stroke-width="22" stroke-linecap="round">
+    <path d="M256 184 A72 72 0 0 1 318.4 312"/>
+    <path d="M328 256 A72 72 0 0 1 200 318.4"/>
+    <path d="M184 256 A72 72 0 0 1 256 184"/>
+  </g>
+  <g fill="none" stroke="#6ea8fe" stroke-width="18" stroke-linecap="round">
+    <line x1="256" y1="256" x2="300.8" y2="193.6"/>
+    <line x1="256" y1="256" x2="193.6" y2="284.8"/>
+    <line x1="256" y1="256" x2="284.8" y2="328"/>
+  </g>
+  <g fill="none" stroke="#6ea8fe" stroke-width="20">
+    <circle cx="300.8" cy="193.6" r="20"/>
+    <circle cx="193.6" cy="284.8" r="20"/>
+    <circle cx="284.8" cy="328" r="20"/>
+  </g>
+</svg>
