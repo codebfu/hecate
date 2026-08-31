@@ -2,7 +2,7 @@
 //! SPDX-License-Identifier: GPL-3.0-or-later
 
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use serde_json::Value;
@@ -524,7 +524,6 @@ async fn install_or_upgrade(
 
     // Explicit version => pin. No version => follow newest on refresh.
     let track_latest = requested_version.is_none();
-    prepare_feature_mirror(pool, config, &manifest).await?;
     mirror_artifacts(pool, config, &client, &catalogue, &manifest).await?;
     persist_feature(pool, &catalogue.source.id, &manifest, track_latest).await?;
     let generated_at = parse_index_generated_at(&catalogue.index)?;
@@ -1122,7 +1121,6 @@ pub async fn sync_installed_artifact_cache(
             }
         };
         let before = count_cached_artifacts(pool, &feature_id, &pinned_version).await?;
-        prepare_feature_mirror(pool, config, &manifest).await?;
         match mirror_artifacts(pool, config, &client, &catalogue, &manifest).await {
             Ok(()) => {
                 let after = count_cached_artifacts(pool, &feature_id, &pinned_version).await?;
@@ -1210,6 +1208,198 @@ async fn write_mirrored_file(path: &Path, bytes: &[u8]) -> ApiResult<()> {
     Ok(())
 }
 
+#[derive(Debug)]
+struct StagedMirrorArtifact {
+    os: String,
+    arch: String,
+    filename: String,
+    sha256: String,
+    update_signature: Option<String>,
+    staging_payload: PathBuf,
+    staging_signature: PathBuf,
+    final_payload: PathBuf,
+    final_signature: PathBuf,
+}
+
+fn feature_staging_root(config: &AppConfig, manifest: &FeatureManifest) -> PathBuf {
+    config
+        .hecate_repo_mirror_dir
+        .join(".staging")
+        .join(&manifest.id)
+        .join(&manifest.version)
+}
+
+fn artifact_mirror_paths(
+    config: &AppConfig,
+    manifest: &FeatureManifest,
+    artifact: &FeatureArtifact,
+    filename: &str,
+) -> (PathBuf, PathBuf, PathBuf) {
+    let directory = config
+        .hecate_repo_mirror_dir
+        .join(&manifest.id)
+        .join(&manifest.version)
+        .join(&artifact.os)
+        .join(&artifact.arch);
+    let payload = directory.join(filename);
+    let signature = directory.join(format!("{filename}.sig"));
+    (directory, payload, signature)
+}
+
+async fn reset_staging_dir(staging_root: &Path) -> ApiResult<()> {
+    if tokio::fs::try_exists(staging_root).await.unwrap_or(false) {
+        tokio::fs::remove_dir_all(staging_root).await.map_err(|error| {
+            ApiError::Internal(anyhow::anyhow!(
+                "failed to reset feature mirror staging directory {}: {error}",
+                staging_root.display()
+            ))
+        })?;
+    }
+    tokio::fs::create_dir_all(staging_root).await.map_err(|error| {
+        ApiError::Internal(anyhow::anyhow!(
+            "failed to create feature mirror staging directory {}: {error}",
+            staging_root.display()
+        ))
+    })?;
+    Ok(())
+}
+
+async fn cleanup_staging_dir(staging_root: &Path) {
+    if !tokio::fs::try_exists(staging_root).await.unwrap_or(false) {
+        return;
+    }
+    if let Err(error) = tokio::fs::remove_dir_all(staging_root).await {
+        tracing::warn!(
+            path = %staging_root.display(),
+            error = %error,
+            "failed to remove feature mirror staging directory"
+        );
+    }
+}
+
+async fn stage_mirror_artifact(
+    config: &AppConfig,
+    client: &reqwest::Client,
+    catalogue: &Catalogue,
+    manifest: &FeatureManifest,
+    artifact: &FeatureArtifact,
+    staging_root: &Path,
+) -> ApiResult<StagedMirrorArtifact> {
+    let filename = Path::new(&artifact.filename)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| ApiError::BadRequest("invalid artifact filename".into()))?;
+
+    let relative_path = artifact_relative_path(manifest, artifact)?;
+    let bytes =
+        fetch_signed_file(client, catalogue, &relative_path, ARTIFACT_MAX_BYTES, false).await?;
+    verify::verify_sha256(&artifact.sha256, &bytes)?;
+    let signature = fetch::fetch_bytes(
+        client,
+        fetch::join_url(&catalogue.source.url, &format!("{relative_path}.sig"))?,
+        64,
+    )
+    .await?;
+    verify::verify_file_signature(&catalogue.source.public_key_b64, &bytes, &signature)?;
+
+    let staging_directory = staging_root
+        .join(&artifact.os)
+        .join(&artifact.arch);
+    tokio::fs::create_dir_all(&staging_directory)
+        .await
+        .map_err(|error| {
+            ApiError::Internal(anyhow::anyhow!(
+                "failed to create feature mirror staging directory {}: {error}",
+                staging_directory.display()
+            ))
+        })?;
+
+    let staging_payload = staging_directory.join(filename);
+    let staging_signature = staging_directory.join(format!("{filename}.sig"));
+    write_mirrored_file(&staging_payload, &bytes).await?;
+    write_mirrored_file(&staging_signature, &signature).await?;
+
+    let (_, final_payload, final_signature) =
+        artifact_mirror_paths(config, manifest, artifact, filename);
+
+    Ok(StagedMirrorArtifact {
+        os: artifact.os.clone(),
+        arch: artifact.arch.clone(),
+        filename: filename.to_string(),
+        sha256: artifact.sha256.to_ascii_lowercase(),
+        update_signature: artifact
+            .update_signature
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
+        staging_payload,
+        staging_signature,
+        final_payload,
+        final_signature,
+    })
+}
+
+async fn promote_staged_file(from: &Path, to: &Path) -> ApiResult<()> {
+    if let Some(parent) = to.parent() {
+        tokio::fs::create_dir_all(parent).await.map_err(|error| {
+            ApiError::Internal(anyhow::anyhow!(
+                "failed to create mirrored artifact directory {}: {error}",
+                parent.display()
+            ))
+        })?;
+    }
+    if tokio::fs::try_exists(to).await.unwrap_or(false) {
+        tokio::fs::remove_file(to).await.map_err(|error| {
+            ApiError::Internal(anyhow::anyhow!(
+                "failed to replace mirrored artifact {}: {error}",
+                to.display()
+            ))
+        })?;
+    }
+    tokio::fs::rename(from, to).await.map_err(|error| {
+        ApiError::Internal(anyhow::anyhow!(
+            "failed to promote mirrored artifact {} -> {}: {error}",
+            from.display(),
+            to.display()
+        ))
+    })?;
+    Ok(())
+}
+
+async fn promote_staged_artifact(pool: &PgPool, manifest: &FeatureManifest, staged: &StagedMirrorArtifact) -> ApiResult<()> {
+    promote_staged_file(&staged.staging_payload, &staged.final_payload).await?;
+    promote_staged_file(&staged.staging_signature, &staged.final_signature).await?;
+
+    sqlx::query(
+        "INSERT INTO feature_artifact_cache
+            (feature_id, version, os, arch, filename, sha256, local_path, update_signature)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         ON CONFLICT (feature_id, version, os, arch) DO UPDATE
+         SET filename = EXCLUDED.filename,
+             sha256 = EXCLUDED.sha256,
+             local_path = EXCLUDED.local_path,
+             update_signature = CASE
+               WHEN EXCLUDED.update_signature IS NULL OR BTRIM(EXCLUDED.update_signature) = ''
+                 THEN feature_artifact_cache.update_signature
+               ELSE EXCLUDED.update_signature
+             END",
+    )
+    .bind(&manifest.id)
+    .bind(&manifest.version)
+    .bind(&staged.os)
+    .bind(&staged.arch)
+    .bind(&staged.filename)
+    .bind(&staged.sha256)
+    .bind(staged.final_payload.to_string_lossy().to_string())
+    .bind(staged.update_signature.as_deref())
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
 async fn mirror_artifacts(
     pool: &PgPool,
     config: &AppConfig,
@@ -1217,81 +1407,54 @@ async fn mirror_artifacts(
     catalogue: &Catalogue,
     manifest: &FeatureManifest,
 ) -> ApiResult<()> {
+    let mut artifacts_to_stage = Vec::new();
     for artifact in &manifest.artifacts {
         if cached_artifact_is_current(pool, manifest, artifact).await? {
             continue;
         }
-
-        let relative_path = artifact_relative_path(manifest, artifact)?;
-        let bytes =
-            fetch_signed_file(client, catalogue, &relative_path, ARTIFACT_MAX_BYTES, false).await?;
-        verify::verify_sha256(&artifact.sha256, &bytes)?;
-        let signature = fetch::fetch_bytes(
-            client,
-            fetch::join_url(&catalogue.source.url, &format!("{relative_path}.sig"))?,
-            64,
-        )
-        .await?;
-        verify::verify_file_signature(&catalogue.source.public_key_b64, &bytes, &signature)?;
-
-        let filename = Path::new(&artifact.filename)
-            .file_name()
-            .and_then(|name| name.to_str())
-            .filter(|name| !name.is_empty())
-            .ok_or_else(|| ApiError::BadRequest("invalid artifact filename".into()))?;
-        let directory = config
-            .hecate_repo_mirror_dir
-            .join(&manifest.id)
-            .join(&manifest.version)
-            .join(&artifact.os)
-            .join(&artifact.arch);
-        tokio::fs::create_dir_all(&directory)
-            .await
-            .map_err(|error| {
-                ApiError::Internal(anyhow::anyhow!(
-                    "failed to create repository mirror directory {}: {error}",
-                    directory.display()
-                ))
-            })?;
-        let local_path = directory.join(filename);
-        write_mirrored_file(&local_path, &bytes).await?;
-        write_mirrored_file(
-            &local_path.with_file_name(format!("{filename}.sig")),
-            &signature,
-        )
-        .await?;
-
-        sqlx::query(
-            "INSERT INTO feature_artifact_cache
-                (feature_id, version, os, arch, filename, sha256, local_path, update_signature)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-             ON CONFLICT (feature_id, version, os, arch) DO UPDATE
-             SET filename = EXCLUDED.filename,
-                 sha256 = EXCLUDED.sha256,
-                 local_path = EXCLUDED.local_path,
-                 update_signature = CASE
-                   WHEN EXCLUDED.update_signature IS NULL OR BTRIM(EXCLUDED.update_signature) = ''
-                     THEN feature_artifact_cache.update_signature
-                   ELSE EXCLUDED.update_signature
-                 END",
-        )
-        .bind(&manifest.id)
-        .bind(&manifest.version)
-        .bind(&artifact.os)
-        .bind(&artifact.arch)
-        .bind(filename)
-        .bind(artifact.sha256.to_ascii_lowercase())
-        .bind(local_path.to_string_lossy().to_string())
-        .bind(
-            artifact
-                .update_signature
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty()),
-        )
-        .execute(pool)
-        .await?;
+        artifacts_to_stage.push(artifact);
     }
+
+    if artifacts_to_stage.is_empty() {
+        return prepare_feature_mirror(pool, config, manifest).await;
+    }
+
+    let staging_root = feature_staging_root(config, manifest);
+    reset_staging_dir(&staging_root).await?;
+
+    let mut staged = Vec::with_capacity(artifacts_to_stage.len());
+    let stage_result = async {
+        for artifact in artifacts_to_stage {
+            staged.push(
+                stage_mirror_artifact(config, client, catalogue, manifest, artifact, &staging_root)
+                    .await?,
+            );
+        }
+        Ok::<(), ApiError>(())
+    }
+    .await;
+
+    if let Err(error) = stage_result {
+        cleanup_staging_dir(&staging_root).await;
+        return Err(error);
+    }
+
+    prepare_feature_mirror(pool, config, manifest).await?;
+
+    let promote_result = async {
+        for artifact in &staged {
+            promote_staged_artifact(pool, manifest, artifact).await?;
+        }
+        Ok::<(), ApiError>(())
+    }
+    .await;
+
+    if let Err(error) = promote_result {
+        cleanup_staging_dir(&staging_root).await;
+        return Err(error);
+    }
+
+    cleanup_staging_dir(&staging_root).await;
     Ok(())
 }
 
