@@ -524,6 +524,7 @@ async fn install_or_upgrade(
 
     // Explicit version => pin. No version => follow newest on refresh.
     let track_latest = requested_version.is_none();
+    prepare_feature_mirror(pool, config, &manifest).await?;
     mirror_artifacts(pool, config, &client, &catalogue, &manifest).await?;
     persist_feature(pool, &catalogue.source.id, &manifest, track_latest).await?;
     let generated_at = parse_index_generated_at(&catalogue.index)?;
@@ -636,6 +637,208 @@ async fn remove_feature_mirror_dir(config: &AppConfig, feature_id: &str) -> ApiR
         ))
     })?;
     tracing::info!(feature_id, path = %path.display(), "removed feature mirror directory");
+    Ok(())
+}
+
+/// Drop stale cache rows and on-disk installers before mirroring a target version.
+async fn prepare_feature_mirror(
+    pool: &PgPool,
+    config: &AppConfig,
+    manifest: &FeatureManifest,
+) -> ApiResult<()> {
+    let expected_os_arch: HashSet<(String, String)> = manifest
+        .artifacts
+        .iter()
+        .map(|artifact| (artifact.os.clone(), artifact.arch.clone()))
+        .collect();
+    let expected_filenames: HashSet<(String, String, String)> = manifest
+        .artifacts
+        .iter()
+        .filter_map(|artifact| {
+            Path::new(&artifact.filename)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .filter(|name| !name.is_empty())
+                .map(|filename| {
+                    (
+                        artifact.os.clone(),
+                        artifact.arch.clone(),
+                        filename.to_string(),
+                    )
+                })
+        })
+        .collect();
+
+    let cached_rows: Vec<(String, String, String, String)> = sqlx::query_as(
+        "SELECT version, os, arch, local_path
+         FROM feature_artifact_cache
+         WHERE feature_id = $1",
+    )
+    .bind(&manifest.id)
+    .fetch_all(pool)
+    .await?;
+
+    for (cached_version, os, arch, local_path) in &cached_rows {
+        let keep = cached_version == manifest.version
+            && expected_os_arch.contains(&(os.clone(), arch.clone()));
+        if keep {
+            continue;
+        }
+        remove_cached_artifact_files(local_path).await;
+        sqlx::query(
+            "DELETE FROM feature_artifact_cache
+             WHERE feature_id = $1 AND version = $2 AND os = $3 AND arch = $4",
+        )
+        .bind(&manifest.id)
+        .bind(cached_version)
+        .bind(os)
+        .bind(arch)
+        .execute(pool)
+        .await?;
+    }
+
+    prune_feature_mirror_tree(
+        &config.hecate_repo_mirror_dir.join(&manifest.id),
+        &manifest.version,
+        &expected_os_arch,
+        &expected_filenames,
+    )
+    .await?;
+
+    Ok(())
+}
+
+async fn remove_cached_artifact_files(local_path: &str) {
+    let path = Path::new(local_path);
+    remove_mirror_file(path).await;
+    if let Some(filename) = path.file_name().and_then(|name| name.to_str()) {
+        remove_mirror_file(&path.with_file_name(format!("{filename}.sig"))).await;
+    }
+}
+
+async fn remove_mirror_file(path: &Path) {
+    if !tokio::fs::try_exists(path).await.unwrap_or(false) {
+        return;
+    }
+    if let Err(error) = tokio::fs::remove_file(path).await {
+        tracing::warn!(
+            path = %path.display(),
+            error = %error,
+            "failed to remove mirrored artifact file"
+        );
+    }
+}
+
+async fn prune_feature_mirror_tree(
+    feature_root: &Path,
+    keep_version: &str,
+    expected_os_arch: &HashSet<(String, String)>,
+    expected_filenames: &HashSet<(String, String, String)>,
+) -> ApiResult<()> {
+    if !tokio::fs::try_exists(feature_root).await.unwrap_or(false) {
+        return Ok(());
+    }
+
+    let mut version_dirs = tokio::fs::read_dir(feature_root).await.map_err(|error| {
+        ApiError::Internal(anyhow::anyhow!(
+            "failed to read feature mirror directory {}: {error}",
+            feature_root.display()
+        ))
+    })?;
+
+    while let Some(version_entry) = version_dirs.next_entry().await.map_err(|error| {
+        ApiError::Internal(anyhow::anyhow!(
+            "failed to read feature mirror directory {}: {error}",
+            feature_root.display()
+        ))
+    })? {
+        let version_name = version_entry.file_name().to_string_lossy().to_string();
+        if version_name != keep_version {
+            tokio::fs::remove_dir_all(version_entry.path())
+                .await
+                .map_err(|error| {
+                    ApiError::Internal(anyhow::anyhow!(
+                        "failed to remove stale feature mirror version {}: {error}",
+                        version_entry.path().display()
+                    ))
+                })?;
+            tracing::info!(
+                path = %version_entry.path().display(),
+                keep_version,
+                "removed stale mirrored feature version"
+            );
+            continue;
+        }
+
+        let version_path = version_entry.path();
+        let mut os_dirs = tokio::fs::read_dir(&version_path).await.map_err(|error| {
+            ApiError::Internal(anyhow::anyhow!(
+                "failed to read mirrored feature version directory {}: {error}",
+                version_path.display()
+            ))
+        })?;
+
+        while let Some(os_entry) = os_dirs.next_entry().await.map_err(|error| {
+            ApiError::Internal(anyhow::anyhow!(
+                "failed to read mirrored feature version directory {}: {error}",
+                version_path.display()
+            ))
+        })? {
+            let os = os_entry.file_name().to_string_lossy().to_string();
+            let os_path = os_entry.path();
+            let mut arch_dirs = tokio::fs::read_dir(&os_path).await.map_err(|error| {
+                ApiError::Internal(anyhow::anyhow!(
+                    "failed to read mirrored feature OS directory {}: {error}",
+                    os_path.display()
+                ))
+            })?;
+
+            while let Some(arch_entry) = arch_dirs.next_entry().await.map_err(|error| {
+                ApiError::Internal(anyhow::anyhow!(
+                    "failed to read mirrored feature OS directory {}: {error}",
+                    os_path.display()
+                ))
+            })? {
+                let arch = arch_entry.file_name().to_string_lossy().to_string();
+                let arch_path = arch_entry.path();
+                if !expected_os_arch.contains(&(os.clone(), arch.clone())) {
+                    tokio::fs::remove_dir_all(&arch_path).await.map_err(|error| {
+                        ApiError::Internal(anyhow::anyhow!(
+                            "failed to remove stale mirrored artifact directory {}: {error}",
+                            arch_path.display()
+                        ))
+                    })?;
+                    continue;
+                }
+
+                let mut files = tokio::fs::read_dir(&arch_path).await.map_err(|error| {
+                    ApiError::Internal(anyhow::anyhow!(
+                        "failed to read mirrored artifact directory {}: {error}",
+                        arch_path.display()
+                    ))
+                })?;
+                while let Some(file_entry) = files.next_entry().await.map_err(|error| {
+                    ApiError::Internal(anyhow::anyhow!(
+                        "failed to read mirrored artifact directory {}: {error}",
+                        arch_path.display()
+                    ))
+                })? {
+                    let file_name = file_entry.file_name().to_string_lossy().to_string();
+                    let keep = if file_name.ends_with(".sig") {
+                        let base = file_name.trim_end_matches(".sig");
+                        expected_filenames
+                            .contains(&(os.clone(), arch.clone(), base.to_string()))
+                    } else {
+                        expected_filenames.contains(&(os.clone(), arch.clone(), file_name))
+                    };
+                    if !keep {
+                        remove_mirror_file(&file_entry.path()).await;
+                    }
+                }
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -919,6 +1122,7 @@ pub async fn sync_installed_artifact_cache(
             }
         };
         let before = count_cached_artifacts(pool, &feature_id, &pinned_version).await?;
+        prepare_feature_mirror(pool, config, &manifest).await?;
         match mirror_artifacts(pool, config, &client, &catalogue, &manifest).await {
             Ok(()) => {
                 let after = count_cached_artifacts(pool, &feature_id, &pinned_version).await?;
