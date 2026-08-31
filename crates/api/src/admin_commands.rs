@@ -509,7 +509,7 @@ pub async fn execute_repo_command(
         }
         "admin.repo.uninstall" => {
             let id = required_string_param(&params, "id")?;
-            feature_repo::install::uninstall(pool, id).await
+            feature_repo::install::uninstall(pool, config, id).await
         }
         other => Err(ApiError::BadRequest(format!(
             "unknown admin command: {other}"

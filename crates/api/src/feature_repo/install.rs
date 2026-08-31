@@ -394,6 +394,14 @@ pub async fn install(
         false,
     )
     .await
+    .map_err(|error| {
+        tracing::error!(
+            feature_id,
+            error = %api_error_message(&error),
+            "feature install failed"
+        );
+        error
+    })
 }
 
 pub async fn upgrade(
@@ -577,7 +585,7 @@ async fn resolve_latest_version(
         .map(str::to_string))
 }
 
-pub async fn uninstall(pool: &PgPool, feature_id: &str) -> ApiResult<Value> {
+pub async fn uninstall(pool: &PgPool, config: &AppConfig, feature_id: &str) -> ApiResult<Value> {
     let feature_json: Option<Value> =
         sqlx::query_scalar("SELECT feature_json FROM installed_features WHERE id = $1")
             .bind(feature_id)
@@ -612,7 +620,23 @@ pub async fn uninstall(pool: &PgPool, feature_id: &str) -> ApiResult<Value> {
             .await?;
     }
     transaction.commit().await?;
+    remove_feature_mirror_dir(config, feature_id).await?;
     Ok(serde_json::json!({ "id": feature_id, "uninstalled": true }))
+}
+
+async fn remove_feature_mirror_dir(config: &AppConfig, feature_id: &str) -> ApiResult<()> {
+    let path = config.hecate_repo_mirror_dir.join(feature_id);
+    if !tokio::fs::try_exists(&path).await.unwrap_or(false) {
+        return Ok(());
+    }
+    tokio::fs::remove_dir_all(&path).await.map_err(|error| {
+        ApiError::Internal(anyhow::anyhow!(
+            "failed to remove feature mirror directory {}: {error}",
+            path.display()
+        ))
+    })?;
+    tracing::info!(feature_id, path = %path.display(), "removed feature mirror directory");
+    Ok(())
 }
 
 async fn find_feature(

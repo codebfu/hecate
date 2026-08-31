@@ -38,8 +38,14 @@ impl IntoResponse for ApiError {
             ApiError::NotFound => (StatusCode::NOT_FOUND, "not_found", self.to_string()),
             ApiError::Conflict(m) => (StatusCode::CONFLICT, "conflict", m.clone()),
             ApiError::TooManyRequests(m) => (StatusCode::TOO_MANY_REQUESTS, "too_many_requests", m.clone()),
-            ApiError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal", "internal error".into()),
-            ApiError::Db(_) => (StatusCode::INTERNAL_SERVER_ERROR, "database", "database error".into()),
+            ApiError::Internal(e) => {
+                tracing::error!(error = %e, "internal API error");
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal", "internal error".into())
+            }
+            ApiError::Db(e) => {
+                tracing::error!(error = %e, "database API error");
+                (StatusCode::INTERNAL_SERVER_ERROR, "database", "database error".into())
+            }
         };
         (status, Json(json!({ "error": code, "message": msg }))).into_response()
     }
