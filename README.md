@@ -2,6 +2,17 @@
 
 Server platform: API, operator UI, MCP bridge, and shared `hecate-protocol` crate.
 
+## Documentation
+
+Product docs for operators and MCP users live in the **[GitHub wiki](https://github.com/codebfu/hecate/wiki)**:
+
+- [Home](https://github.com/codebfu/hecate/wiki)
+- [Why Hecate is safer than SSH](https://github.com/codebfu/hecate/wiki/Why-Hecate-is-safer-than-SSH)
+- [Getting started](https://github.com/codebfu/hecate/wiki/Getting-Started)
+- [Features](https://github.com/codebfu/hecate/wiki/Features)
+
+Long technical runbooks remain versioned under [`docs/`](docs/).
+
 ## Quick start (development)
 
 Build images locally from this repository:

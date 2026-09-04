@@ -1,5 +1,7 @@
 # Hecate ecosystem (GitHub)
 
+Product documentation (ops / users): **[hecate wiki](https://github.com/codebfu/hecate/wiki)**.
+
 | Repository | Role |
 |---|---|
 | [hecate](https://github.com/codebfu/hecate) | Server API, UI, MCP, protocol crate |
