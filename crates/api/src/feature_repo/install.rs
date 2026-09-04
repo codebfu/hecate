@@ -678,7 +678,7 @@ async fn prepare_feature_mirror(
     .await?;
 
     for (cached_version, os, arch, local_path) in &cached_rows {
-        let keep = cached_version == manifest.version
+        let keep = cached_version.as_str() == manifest.version.as_str()
             && expected_os_arch.contains(&(os.clone(), arch.clone()));
         if keep {
             continue;
