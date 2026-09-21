@@ -70,6 +70,25 @@ pub async fn execute_platform_command(
 
     match command_name {
         "permissions.request" => handle_permissions_request(pool, identity_id, params).await,
+        "permissions.requests.mine" => {
+            let query = PermissionRequestListQuery {
+                limit: params.get("limit").and_then(|v| v.as_i64()),
+                offset: params.get("offset").and_then(|v| v.as_i64()),
+                status: params
+                    .get("status")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+                request_id: params
+                    .get("request_id")
+                    .and_then(|v| v.as_str())
+                    .map(Uuid::parse_str)
+                    .transpose()
+                    .map_err(|_| ApiError::BadRequest("invalid request_id".into()))?,
+            };
+            let response =
+                permission_requests::list_mine(pool, identity_id, &query).await?;
+            Ok(serde_json::to_value(response).map_err(|e| ApiError::Internal(e.into()))?)
+        }
         other => Err(ApiError::BadRequest(format!(
             "unknown platform command: {other}"
         ))),
@@ -376,10 +395,13 @@ async fn execute_authz_command(
                 .transpose()
                 .map_err(|_| ApiError::BadRequest("invalid identity_id".into()))?
                 .unwrap_or(identity_id);
+            if target == identity_id {
+                return Err(ApiError::Forbidden);
+            }
             let assignment: GrantAssignmentInput = serde_json::from_value(params)
                 .map_err(|e| ApiError::BadRequest(format!("invalid assignment: {e}")))?;
             let input = SetGrantAssignmentsInput {
-                assignments: vec![assignment],
+                assignments: vec![assignment.clone()],
             };
             let current = store::load_grant_assignments(pool, target).await?;
             let mut merged = SetGrantAssignmentsInput {
@@ -394,8 +416,21 @@ async fn execute_authz_command(
                     .collect(),
             };
             merged.assignments.extend(input.assignments);
-            Ok(serde_json::to_value(store::set_grant_assignments(pool, target, merged).await?)
-                .map_err(|e| ApiError::Internal(e.into()))?)
+            let result = store::set_grant_assignments(pool, target, merged).await?;
+            crate::audit::append_audit(
+                pool,
+                &identity_id.to_string(),
+                "authz.assignments.set",
+                &target.to_string(),
+                "",
+                &serde_json::json!({
+                    "ai_identity_id": target,
+                    "access_grant_id": assignment.access_grant_id,
+                    "assignment_count": result.len(),
+                }),
+            )
+            .await?;
+            Ok(serde_json::to_value(result).map_err(|e| ApiError::Internal(e.into()))?)
         }
         "admin.authz.assignments.remove" => {
             let target = params
@@ -405,10 +440,26 @@ async fn execute_authz_command(
                 .transpose()
                 .map_err(|_| ApiError::BadRequest("invalid identity_id".into()))?
                 .unwrap_or(identity_id);
+            if target == identity_id {
+                return Err(ApiError::Forbidden);
+            }
             let input: RemoveAssignmentsInput = serde_json::from_value(params)
                 .map_err(|e| ApiError::BadRequest(format!("invalid remove request: {e}")))?;
-            Ok(serde_json::to_value(store::remove_assignments(pool, target, input).await?)
-                .map_err(|e| ApiError::Internal(e.into()))?)
+            let result = store::remove_assignments(pool, target, input.clone()).await?;
+            crate::audit::append_audit(
+                pool,
+                &identity_id.to_string(),
+                "authz.assignments.remove",
+                &target.to_string(),
+                "",
+                &serde_json::json!({
+                    "ai_identity_id": target,
+                    "assignment_ids": input.assignment_ids,
+                    "reason": input.reason,
+                }),
+            )
+            .await?;
+            Ok(serde_json::to_value(result).map_err(|e| ApiError::Internal(e.into()))?)
         }
         "admin.authz.effective_rights.read" => {
             let target = params
@@ -571,7 +622,11 @@ mod tests {
     #[test]
     fn platform_command_allowed_includes_permissions_request_by_default_rules() {
         let rules = CapabilityProfileRules {
-            allowed_commands: vec!["system.info".into(), "permissions.request".into()],
+            allowed_commands: vec![
+                "system.info".into(),
+                "permissions.request".into(),
+                "permissions.requests.mine".into(),
+            ],
             allowed_admin_commands: vec![],
             shell_policy: Default::default(),
             elevation_policy: Default::default(),
@@ -583,6 +638,10 @@ mod tests {
         assert!(platform_command_allowed(
             &rules.allowed_commands,
             "permissions.request"
+        ));
+        assert!(platform_command_allowed(
+            &rules.allowed_commands,
+            "permissions.requests.mine"
         ));
         assert!(!admin_command_allowed(
             &rules.allowed_admin_commands,

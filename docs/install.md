@@ -133,7 +133,7 @@ INTERNAL_TOKEN=<internal-token>
 WEBAUTHN_RP_ID=<FQDN>
 WEBAUTHN_RP_ORIGIN=https://<FQDN>:<HTTPS_PORT>
 CORS_ALLOWED_ORIGINS=https://<FQDN>:<HTTPS_PORT>
-MCP_ALLOWED_HOSTS=<FQDN>,localhost,mcp
+MCP_ALLOWED_HOSTS=<FQDN>
 HECATE_PUBLIC_BASE_URL=https://<FQDN>:<HTTPS_PORT>
 RUST_LOG=info
 GITLAB_HOST=<gitlab-host>
@@ -156,6 +156,7 @@ Notes:
 
 - `HECATE_ENV=production` is required; the API refuses default secrets in production.
 - `INTERNAL_TOKEN` is shared only between the API and MCP containers — not an operator API key.
+- `MCP_ALLOWED_HOSTS` is optional when `HECATE_PUBLIC_BASE_URL` is set: MCP derives the Host allowlist from that URL and omits loopback. Set `MCP_ALLOWED_HOSTS` only to override (comma-separated hostnames).
 - `GITLAB_PACKAGE_REGISTRY_TOKEN` and `RELEASE_SIGNING_PUBLIC_KEY_B64` can be left empty if you do not sync agent releases from GitLab Package Registry. Registry login passwords often lack `read_package_registry`; use a deploy token or PAT when you need release sync.
 - For the official feature repo (`https://repo.hecate-mcp.com`), set `HECATE_REPO_URL` and `RELEASE_SIGNING_PUBLIC_KEY_B64=kHWEtm3yvH9wV2PPb2FMB9XJ0oM68CvUXTUxzAWeGTo=`. A wrong key causes `repository signature verification failed` when refreshing or installing features.
 - `GITLAB_PACKAGE_PROJECTS` maps `os:arch:project_id` for your GitLab projects; change IDs to match your instance.

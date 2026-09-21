@@ -1,7 +1,7 @@
 // Copyright (C) 2026 Gaultier HUBERT
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import express from "express";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -26,16 +26,56 @@ type SessionEntry = {
   apiKeyHash: string;
 };
 
+const LOOPBACK_HOSTS = ["127.0.0.1", "localhost", "[::1]"];
+
+function hostnameFromPublicBaseUrl(publicBaseUrl: string | undefined): string | undefined {
+  if (!publicBaseUrl?.trim()) {
+    return undefined;
+  }
+  try {
+    const hostname = new URL(publicBaseUrl.trim()).hostname.toLowerCase();
+    return hostname || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Resolve MCP Host allowlist: explicit env wins; otherwise derive from public URL + loopback in dev. */
+export function resolveAllowedHosts(env: NodeJS.ProcessEnv = process.env): string[] {
+  const explicit = env.MCP_ALLOWED_HOSTS?.trim();
+  if (explicit) {
+    return explicit
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean);
+  }
+
+  const hosts = new Set<string>();
+  const publicHostname = hostnameFromPublicBaseUrl(env.HECATE_PUBLIC_BASE_URL);
+  if (publicHostname) {
+    hosts.add(publicHostname);
+  } else {
+    for (const host of LOOPBACK_HOSTS) {
+      hosts.add(host);
+    }
+  }
+
+  if (hosts.size === 0) {
+    for (const host of LOOPBACK_HOSTS) {
+      hosts.add(host);
+    }
+  }
+
+  return [...hosts];
+}
+
 export function loadConfigFromEnv(): ServerConfig {
   return {
     port: Number(process.env.MCP_PORT ?? "3100"),
     host: process.env.MCP_HOST ?? "127.0.0.1",
     apiBaseUrl: process.env.HECATE_API_URL ?? "http://127.0.0.1:8080",
     internalToken: process.env.HECATE_INTERNAL_TOKEN ?? "",
-    allowedHosts: (process.env.MCP_ALLOWED_HOSTS ?? "127.0.0.1,localhost,[::1]")
-      .split(",")
-      .map((value) => value.trim())
-      .filter(Boolean),
+    allowedHosts: resolveAllowedHosts(),
     publicBaseUrl: process.env.HECATE_PUBLIC_BASE_URL?.trim() || undefined,
   };
 }
@@ -56,7 +96,12 @@ export function verifySessionBearer(entry: SessionEntry, apiKey: string | undefi
   if (!apiKey) {
     return false;
   }
-  return entry.apiKeyHash === hashApiKey(apiKey);
+  const expected = Buffer.from(entry.apiKeyHash, "utf8");
+  const actual = Buffer.from(hashApiKey(apiKey), "utf8");
+  if (expected.length !== actual.length) {
+    return false;
+  }
+  return timingSafeEqual(expected, actual);
 }
 
 export function createMcpServer(

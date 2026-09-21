@@ -31,17 +31,19 @@ AI identities can request permanent permission changes via `request_permissions`
 
 ## After submission
 
+- Poll `list_my_permission_requests` (platform command `permissions.requests.mine`) with the returned `request_id` or `status` filter (`pending` / `approved` / `rejected`) to learn the outcome, including `review_reason` when rejected.
 - An operator reviews requests in the Hecate UI **Permission requests** page.
 - An identity with `admin.permissions.request.approve` may approve **other** identities' **standard** requests, never its own.
 - On approval, proposed entities are materialized and assignments are applied additively.
 
 ## Rejection
 
-Operators or an AI with `admin.permissions.request.reject` can reject without changing current assignments.
+Operators or an AI with `admin.permissions.request.reject` can reject without changing current assignments. The calling identity can read the rejection reason via `list_my_permission_requests` with `status=rejected`.
 
 ## Related tools
 
-- `list_permission_requests` — paginated list (default status: pending)
+- `list_my_permission_requests` — list **your** requests (bootstrap; includes status and review_reason)
+- `list_permission_requests` — paginated fleet-wide list (requires `admin.permissions.requests.list`)
 - `read_grant_assignments` — read assignments for self or another identity (admin)
 - `read_effective_rights` — computed rights matrix (admin; prefer `hecate://context/effective-rights` for self)
 

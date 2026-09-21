@@ -118,7 +118,11 @@ pub const DEFAULT_TIMEOUT_SECS: u32 = 30;
 pub const DEFAULT_MAX_CONCURRENT: u32 = 4;
 
 fn default_allowed_commands() -> Vec<String> {
-    vec!["system.info".into(), "permissions.request".into()]
+    vec![
+        "system.info".into(),
+        "permissions.request".into(),
+        "permissions.requests.mine".into(),
+    ]
 }
 
 /// Deny-by-default machine scope with read-only `system.info` and conservative execution limits.
@@ -258,7 +262,11 @@ mod tests {
         assert!(rules.machine_tags.is_empty());
         assert_eq!(
             rules.allowed_commands,
-            vec!["system.info", "permissions.request"]
+            vec![
+                "system.info",
+                "permissions.request",
+                "permissions.requests.mine"
+            ]
         );
         assert!(rules.allowed_admin_commands.is_empty());
         assert_eq!(rules.max_output_bytes, DEFAULT_MAX_OUTPUT_BYTES);

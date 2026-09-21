@@ -17,7 +17,7 @@ export const DEFAULT_CAPABILITY_PROFILE: Pick<
   | "timeout_secs"
   | "max_concurrent"
 > = {
-  allowed_commands: ["permissions.request"],
+  allowed_commands: ["permissions.request", "permissions.requests.mine"],
   allowed_admin_commands: [],
   shell_policy: { allowed_binaries: [], allowed_cwd: [], allowed_env: [] },
   elevation_policy: { enabled: false, allowed_binaries: [] },

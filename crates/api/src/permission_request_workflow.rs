@@ -6,18 +6,21 @@
 use std::collections::HashMap;
 
 use hecate_protocol::authz::{
-    AutoApproveWarning, EntityRef, PermissionRequestChanges, PermissionRequestClass,
-    PermissionRequestEntitiesToCreate, PermissionRequestPreview, ProposedAccessGrant,
-    ProposedCapabilityProfile, ProposedFleetScope, RequestedAssignment, TagMatchMode,
+    is_internal_catalog_access_grant, AutoApproveWarning, EffectiveRightsSummary, EntityRef,
+    PermissionRequestChanges, PermissionRequestClass, PermissionRequestEntitiesToCreate,
+    PermissionRequestPreview, ProposedCapabilityProfile, RequestedAssignment,
     BOOTSTRAP_ACCESS_GRANT_ID,
 };
-use hecate_protocol::machine_tags;
-use hecate_protocol::permissions::{validate_machine_ids, ALLOWLIST_WILDCARD, MACHINE_IDS_WILDCARD};
+use hecate_protocol::permissions::{
+    machine_ids_allow_all, validate_machine_ids, ALLOWLIST_WILDCARD, MACHINE_IDS_WILDCARD,
+};
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::authz::{self, store};
 use crate::error::{ApiError, ApiResult};
+use crate::machines;
+use crate::server_settings;
 
 const MIN_REASON_LEN: usize = 10;
 const MAX_REASON_LEN: usize = 2000;
@@ -56,54 +59,123 @@ pub async fn validate_and_classify(
         return Err(ApiError::BadRequest("requested_changes is empty".into()));
     }
 
-    let mut has_admin = false;
-    let mut has_standard = false;
+    let mut has_admin_cmds = false;
+    let mut has_standard_cmds = false;
+    let mut force_admin = false;
+
+    for scope in &changes.propose_fleet_scopes {
+        validate_machine_ids(&scope.machine_ids).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+        if machine_ids_allow_all(&scope.machine_ids) {
+            force_admin = true;
+        }
+    }
 
     for profile in &changes.propose_capability_profiles {
         validate_proposed_profile(profile)?;
-        if profile.allowed_admin_commands.is_empty() {
-            if !profile.allowed_commands.is_empty() {
-                has_standard = true;
-            }
-        } else {
-            has_admin = true;
-        }
-        if !profile.allowed_commands.is_empty() {
-            has_standard = true;
-        }
+        classify_profile_flags(
+            profile,
+            &mut has_admin_cmds,
+            &mut has_standard_cmds,
+            &mut force_admin,
+        );
     }
 
     for grant in &changes.propose_access_grants {
         let profile = resolve_profile_for_ref(pool, changes, &grant.capability_profile).await?;
-        if !profile.allowed_admin_commands.is_empty() {
-            has_admin = true;
-        }
-        if !profile.allowed_commands.is_empty() {
-            has_standard = true;
+        classify_profile_flags(
+            &profile,
+            &mut has_admin_cmds,
+            &mut has_standard_cmds,
+            &mut force_admin,
+        );
+        if scope_ref_is_fleet_wildcard(pool, changes, &grant.fleet_scope).await? {
+            force_admin = true;
         }
     }
 
     for assignment in &changes.add_assignments {
         let profile = resolve_profile_for_assignment(pool, changes, assignment).await?;
-        if !profile.allowed_admin_commands.is_empty() {
-            has_admin = true;
-        }
-        if !profile.allowed_commands.is_empty() {
-            has_standard = true;
+        classify_profile_flags(
+            &profile,
+            &mut has_admin_cmds,
+            &mut has_standard_cmds,
+            &mut force_admin,
+        );
+        if assignment_scope_is_fleet_wildcard(pool, changes, assignment).await? {
+            force_admin = true;
         }
     }
 
-    if has_admin && has_standard {
+    if has_admin_cmds && has_standard_cmds {
         return Err(ApiError::BadRequest(
             "Submit separate permission requests for admin and standard rights".into(),
         ));
     }
 
-    Ok(if has_admin {
+    Ok(if has_admin_cmds || force_admin {
         PermissionRequestClass::Admin
     } else {
         PermissionRequestClass::Standard
     })
+}
+
+fn classify_profile_flags(
+    profile: &ProposedCapabilityProfile,
+    has_admin_cmds: &mut bool,
+    has_standard_cmds: &mut bool,
+    force_admin: &mut bool,
+) {
+    if !profile.allowed_admin_commands.is_empty() {
+        *has_admin_cmds = true;
+    }
+    if !profile.allowed_commands.is_empty() {
+        *has_standard_cmds = true;
+    }
+    if profile.elevation_policy.enabled {
+        *force_admin = true;
+    }
+}
+
+async fn scope_ref_is_fleet_wildcard(
+    pool: &PgPool,
+    changes: &PermissionRequestChanges,
+    entity_ref: &EntityRef,
+) -> ApiResult<bool> {
+    match entity_ref {
+        EntityRef::Proposed { key } => Ok(changes
+            .propose_fleet_scopes
+            .iter()
+            .find(|s| &s.key == key)
+            .map(|s| machine_ids_allow_all(&s.machine_ids))
+            .unwrap_or(false)),
+        EntityRef::Id { id } => {
+            reject_if_request_scoped_scope(pool, *id).await?;
+            let scope = store::get_fleet_scope(pool, *id).await?;
+            Ok(machine_ids_allow_all(&scope.machine_ids))
+        }
+    }
+}
+
+async fn assignment_scope_is_fleet_wildcard(
+    pool: &PgPool,
+    changes: &PermissionRequestChanges,
+    assignment: &RequestedAssignment,
+) -> ApiResult<bool> {
+    match &assignment.access_grant {
+        EntityRef::Proposed { key } => {
+            let grant = changes
+                .propose_access_grants
+                .iter()
+                .find(|g| &g.key == key)
+                .ok_or_else(|| ApiError::BadRequest(format!("unknown proposed grant key: {key}")))?;
+            scope_ref_is_fleet_wildcard(pool, changes, &grant.fleet_scope).await
+        }
+        EntityRef::Id { id } => {
+            reject_if_request_scoped_grant(pool, *id).await?;
+            let detail = store::get_access_grant(pool, *id).await?;
+            Ok(machine_ids_allow_all(&detail.fleet_scope.machine_ids))
+        }
+    }
 }
 
 pub async fn build_preview(
@@ -112,6 +184,7 @@ pub async fn build_preview(
     changes: &PermissionRequestChanges,
 ) -> ApiResult<PermissionRequestPreview> {
     let effective_before = authz::compute_effective_rights(pool, identity_id).await?;
+    let effective_after = simulate_effective_rights_after(pool, identity_id, changes).await?;
     let mut warnings = Vec::new();
     for assignment in &changes.add_assignments {
         if !assignment.requires_approval_for_shell {
@@ -138,10 +211,212 @@ pub async fn build_preview(
         },
         assignments_to_add: changes.add_assignments.clone(),
         assignments_to_remove: changes.remove_assignment_ids.clone(),
-        effective_rights_before: effective_before.summary.clone(),
-        effective_rights_after: effective_before.summary,
+        effective_rights_before: effective_before.summary,
+        effective_rights_after: effective_after,
         auto_approve_warnings: warnings,
     })
+}
+
+async fn simulate_effective_rights_after(
+    pool: &PgPool,
+    identity_id: Uuid,
+    changes: &PermissionRequestChanges,
+) -> ApiResult<EffectiveRightsSummary> {
+    let current = store::load_enabled_assignment_details(pool, identity_id).await?;
+    let remove: std::collections::HashSet<Uuid> =
+        changes.remove_assignment_ids.iter().copied().collect();
+
+    let mut allowed_commands = Vec::new();
+    let mut allowed_admin_commands = Vec::new();
+    let mut machine_ids = std::collections::BTreeSet::new();
+    let mut machine_tags = std::collections::BTreeSet::new();
+    let mut max_concurrent_limit = u32::MAX;
+    let mut assignment_count = 0usize;
+    let mut matching_scopes: Vec<hecate_protocol::authz::FleetScope> = Vec::new();
+
+    let mut kept_grant_ids = std::collections::HashSet::new();
+
+    for (assignment, detail) in &current {
+        if remove.contains(&assignment.id) {
+            continue;
+        }
+        kept_grant_ids.insert(detail.grant.id);
+        merge_preview_strings(
+            &mut allowed_commands,
+            &detail.capability_profile.allowed_commands,
+        );
+        merge_preview_strings(
+            &mut allowed_admin_commands,
+            &detail.capability_profile.allowed_admin_commands,
+        );
+        max_concurrent_limit =
+            max_concurrent_limit.min(detail.capability_profile.max_concurrent.max(1));
+        for machine_id in &detail.fleet_scope.machine_ids {
+            machine_ids.insert(machine_id.clone());
+        }
+        for tag in &detail.fleet_scope.tags {
+            machine_tags.insert(tag.clone());
+        }
+        if !is_internal_catalog_access_grant(detail.grant.id) {
+            assignment_count += 1;
+            matching_scopes.push(detail.fleet_scope.clone());
+        }
+    }
+
+    for assignment in &changes.add_assignments {
+        let (profile, scope, grant_id) =
+            resolve_assignment_preview_parts(pool, changes, assignment).await?;
+        let replacing = grant_id.is_some_and(|id| kept_grant_ids.contains(&id));
+        if let Some(id) = grant_id {
+            kept_grant_ids.insert(id);
+        }
+        merge_preview_strings(&mut allowed_commands, &profile.allowed_commands);
+        merge_preview_strings(&mut allowed_admin_commands, &profile.allowed_admin_commands);
+        let max_c = profile.max_concurrent.unwrap_or(4).max(1);
+        max_concurrent_limit = max_concurrent_limit.min(max_c);
+        for machine_id in &scope.machine_ids {
+            machine_ids.insert(machine_id.clone());
+        }
+        for tag in &scope.tags {
+            machine_tags.insert(tag.clone());
+        }
+        let is_internal = grant_id.is_some_and(is_internal_catalog_access_grant);
+        if !is_internal {
+            if !replacing {
+                assignment_count += 1;
+            }
+            matching_scopes.push(scope);
+        }
+    }
+
+    let sources = server_settings::authz_tag_sources(pool).await?;
+    let machine_scope_count = if machine_ids.is_empty() && machine_tags.is_empty() {
+        0
+    } else {
+        let rows: Vec<machines::MachineRow> = sqlx::query_as(
+            "SELECT id, hostname, os, arch, tags, operator_tags, agent_version,
+                    desktop_version, proxmox_version, last_seen_at, agent_healthy,
+                    agent_secs_since_last_pull, agent_current_command_id
+             FROM machines
+             WHERE deleted_at IS NULL",
+        )
+        .fetch_all(pool)
+        .await?;
+        rows.into_iter()
+            .filter(|row| {
+                let authz_tags =
+                    machines::authz_tags(&row.tags, &row.operator_tags, sources).unwrap_or_default();
+                matching_scopes
+                    .iter()
+                    .any(|scope| authz::fleet_scope_matches(scope, row.id, &authz_tags))
+            })
+            .count()
+    };
+
+    Ok(EffectiveRightsSummary {
+        assignment_count,
+        machine_scope_count,
+        allowed_command_count: allowed_commands.len(),
+        allowed_admin_command_count: allowed_admin_commands.len(),
+        max_concurrent_limit: if max_concurrent_limit == u32::MAX {
+            0
+        } else {
+            max_concurrent_limit
+        },
+    })
+}
+
+fn merge_preview_strings(target: &mut Vec<String>, source: &[String]) {
+    if source.iter().any(|entry| entry == ALLOWLIST_WILDCARD) {
+        *target = vec![ALLOWLIST_WILDCARD.into()];
+        return;
+    }
+    if target.iter().any(|entry| entry == ALLOWLIST_WILDCARD) {
+        return;
+    }
+    for item in source {
+        if !target.contains(item) {
+            target.push(item.clone());
+        }
+    }
+    target.sort();
+}
+
+async fn resolve_assignment_preview_parts(
+    pool: &PgPool,
+    changes: &PermissionRequestChanges,
+    assignment: &RequestedAssignment,
+) -> ApiResult<(
+    ProposedCapabilityProfile,
+    hecate_protocol::authz::FleetScope,
+    Option<Uuid>,
+)> {
+    match &assignment.access_grant {
+        EntityRef::Id { id } => {
+            reject_if_request_scoped_grant(pool, *id).await?;
+            let detail = store::get_access_grant(pool, *id).await?;
+            Ok((
+                ProposedCapabilityProfile {
+                    key: detail.capability_profile.id.to_string(),
+                    name: detail.capability_profile.name.clone(),
+                    description: detail.capability_profile.description.clone(),
+                    allowed_commands: detail.capability_profile.allowed_commands.clone(),
+                    allowed_admin_commands: detail.capability_profile.allowed_admin_commands.clone(),
+                    shell_policy: detail.capability_profile.shell_policy.clone(),
+                    elevation_policy: detail.capability_profile.elevation_policy.clone(),
+                    max_output_bytes: Some(detail.capability_profile.max_output_bytes),
+                    max_file_bytes: Some(detail.capability_profile.max_file_bytes),
+                    timeout_secs: Some(detail.capability_profile.timeout_secs),
+                    max_concurrent: Some(detail.capability_profile.max_concurrent),
+                },
+                detail.fleet_scope,
+                Some(*id),
+            ))
+        }
+        EntityRef::Proposed { key } => {
+            let grant = changes
+                .propose_access_grants
+                .iter()
+                .find(|g| &g.key == key)
+                .ok_or_else(|| ApiError::BadRequest(format!("unknown proposed grant key: {key}")))?;
+            let profile = resolve_profile_for_ref(pool, changes, &grant.capability_profile).await?;
+            let scope = resolve_scope_for_preview(pool, changes, &grant.fleet_scope).await?;
+            Ok((profile, scope, None))
+        }
+    }
+}
+
+async fn resolve_scope_for_preview(
+    pool: &PgPool,
+    changes: &PermissionRequestChanges,
+    entity_ref: &EntityRef,
+) -> ApiResult<hecate_protocol::authz::FleetScope> {
+    match entity_ref {
+        EntityRef::Proposed { key } => {
+            let proposed = changes
+                .propose_fleet_scopes
+                .iter()
+                .find(|s| &s.key == key)
+                .ok_or_else(|| ApiError::BadRequest(format!("unknown proposed scope key: {key}")))?;
+            Ok(hecate_protocol::authz::FleetScope {
+                id: Uuid::nil(),
+                name: proposed.name.clone(),
+                description: proposed.description.clone(),
+                tag_match_mode: proposed.tag_match_mode,
+                provenance: hecate_protocol::authz::AuthzProvenance::PermissionRequest,
+                request_scoped: true,
+                owner_ai_identity_id: None,
+                machine_ids: proposed.machine_ids.clone(),
+                tags: proposed.tags.clone(),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            })
+        }
+        EntityRef::Id { id } => {
+            reject_if_request_scoped_scope(pool, *id).await?;
+            store::get_fleet_scope(pool, *id).await
+        }
+    }
 }
 
 pub async fn validate_remove_assignments(
@@ -377,6 +652,7 @@ async fn resolve_profile_for_ref(
             .cloned()
             .ok_or_else(|| ApiError::BadRequest(format!("unknown proposed profile key: {key}"))),
         EntityRef::Id { id } => {
+            reject_if_request_scoped_profile(pool, *id).await?;
             let profile = store::get_capability_profile(pool, *id).await?;
             Ok(ProposedCapabilityProfile {
                 key: id.to_string(),
@@ -408,6 +684,7 @@ async fn resolve_profile_for_assignment(
             .find(|g| &g.key == key)
             .ok_or_else(|| ApiError::BadRequest(format!("unknown proposed grant key: {key}")))?,
         EntityRef::Id { id } => {
+            reject_if_request_scoped_grant(pool, *id).await?;
             let detail = store::get_access_grant(pool, *id).await?;
             return Ok(ProposedCapabilityProfile {
                 key: detail.capability_profile.id.to_string(),
@@ -427,6 +704,36 @@ async fn resolve_profile_for_assignment(
     resolve_profile_for_ref(pool, changes, &grant.capability_profile).await
 }
 
+async fn reject_if_request_scoped_scope(pool: &PgPool, id: Uuid) -> ApiResult<()> {
+    let scope = store::get_fleet_scope(pool, id).await?;
+    if scope.request_scoped {
+        return Err(ApiError::BadRequest(
+            "cannot reference request-scoped fleet scopes; promote to catalog first".into(),
+        ));
+    }
+    Ok(())
+}
+
+async fn reject_if_request_scoped_profile(pool: &PgPool, id: Uuid) -> ApiResult<()> {
+    let profile = store::get_capability_profile(pool, id).await?;
+    if profile.request_scoped {
+        return Err(ApiError::BadRequest(
+            "cannot reference request-scoped capability profiles; promote to catalog first".into(),
+        ));
+    }
+    Ok(())
+}
+
+async fn reject_if_request_scoped_grant(pool: &PgPool, id: Uuid) -> ApiResult<()> {
+    let detail = store::get_access_grant(pool, id).await?;
+    if detail.grant.request_scoped {
+        return Err(ApiError::BadRequest(
+            "cannot reference request-scoped access grants; promote to catalog first".into(),
+        ));
+    }
+    Ok(())
+}
+
 async fn resolve_scope_id(
     pool: &PgPool,
     _changes: &PermissionRequestChanges,
@@ -439,7 +746,7 @@ async fn resolve_scope_id(
             .copied()
             .ok_or_else(|| ApiError::BadRequest(format!("unknown proposed scope key: {key}"))),
         EntityRef::Id { id } => {
-            store::get_fleet_scope(pool, *id).await?;
+            reject_if_request_scoped_scope(pool, *id).await?;
             Ok(*id)
         }
     }
@@ -457,7 +764,7 @@ async fn resolve_profile_id(
             .copied()
             .ok_or_else(|| ApiError::BadRequest(format!("unknown proposed profile key: {key}"))),
         EntityRef::Id { id } => {
-            store::get_capability_profile(pool, *id).await?;
+            reject_if_request_scoped_profile(pool, *id).await?;
             Ok(*id)
         }
     }
@@ -475,7 +782,7 @@ async fn resolve_grant_id(
             .copied()
             .ok_or_else(|| ApiError::BadRequest(format!("unknown proposed grant key: {key}"))),
         EntityRef::Id { id } => {
-            store::get_access_grant(pool, *id).await?;
+            reject_if_request_scoped_grant(pool, *id).await?;
             Ok(*id)
         }
     }
@@ -489,4 +796,48 @@ pub fn ai_may_approve_standard_tier1(changes: &PermissionRequestChanges) -> bool
         && changes.add_assignments.iter().all(|a| {
             matches!(a.access_grant, EntityRef::Id { .. })
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hecate_protocol::permissions::ElevationPolicy;
+
+    #[test]
+    fn elevation_forces_admin_classification_flag() {
+        let mut has_admin_cmds = false;
+        let mut has_standard_cmds = false;
+        let mut force_admin = false;
+        let profile = ProposedCapabilityProfile {
+            key: "cp1".into(),
+            name: "wide".into(),
+            description: String::new(),
+            allowed_commands: vec!["shell.run".into()],
+            allowed_admin_commands: vec![],
+            shell_policy: Default::default(),
+            elevation_policy: ElevationPolicy {
+                enabled: true,
+                allowed_binaries: vec!["*".into()],
+            },
+            max_output_bytes: None,
+            max_file_bytes: None,
+            timeout_secs: None,
+            max_concurrent: None,
+        };
+        classify_profile_flags(
+            &profile,
+            &mut has_admin_cmds,
+            &mut has_standard_cmds,
+            &mut force_admin,
+        );
+        assert!(!has_admin_cmds);
+        assert!(has_standard_cmds);
+        assert!(force_admin);
+    }
+
+    #[test]
+    fn fleet_wildcard_detected() {
+        assert!(machine_ids_allow_all(&[MACHINE_IDS_WILDCARD.into()]));
+        assert!(!machine_ids_allow_all(&["00000000-0000-4000-8000-000000000001".into()]));
+    }
 }

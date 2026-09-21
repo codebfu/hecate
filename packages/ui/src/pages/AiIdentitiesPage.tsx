@@ -15,6 +15,8 @@ function IdentityPanel({ identityId, isAdmin }: { identityId: string; isAdmin: b
   const queryClient = useQueryClient();
   const toast = useToast();
   const [newKey, setNewKey] = useState<string | null>(null);
+  const [expireMode, setExpireMode] = useState<"never" | "expires">("never");
+  const [expiresAtLocal, setExpiresAtLocal] = useState("");
 
   const keysQuery = useQuery({
     queryKey: ["ai-api-keys", identityId],
@@ -24,9 +26,20 @@ function IdentityPanel({ identityId, isAdmin }: { identityId: string; isAdmin: b
   });
 
   const createKeyMutation = useMutation({
-    mutationFn: () => apiClient.createAiApiKey(identityId),
+    mutationFn: () => {
+      if (expireMode === "expires") {
+        if (!expiresAtLocal) {
+          return Promise.reject(new Error("Pick an expiration date"));
+        }
+        const expiresAt = new Date(expiresAtLocal).toISOString();
+        return apiClient.createAiApiKey(identityId, expiresAt);
+      }
+      return apiClient.createAiApiKey(identityId, null);
+    },
     onSuccess: (data) => {
       setNewKey(data.api_key);
+      setExpireMode("never");
+      setExpiresAtLocal("");
       void queryClient.invalidateQueries({ queryKey: ["ai-api-keys", identityId] });
     },
     onError: (err) =>
@@ -55,6 +68,10 @@ function IdentityPanel({ identityId, isAdmin }: { identityId: string; isAdmin: b
         {(keysQuery.data ?? []).map((key) => (
           <li key={key.id}>
             {key.prefix}… {key.active ? "active" : "revoked"}
+            {" · "}
+            {key.expires_at
+              ? `expires ${new Date(key.expires_at).toLocaleString()}`
+              : "never expires"}
             {key.active ? (
               <button type="button" onClick={() => revokeKeyMutation.mutate(key.id)}>
                 Revoke
@@ -63,9 +80,37 @@ function IdentityPanel({ identityId, isAdmin }: { identityId: string; isAdmin: b
           </li>
         ))}
       </ul>
-      <button type="button" onClick={() => createKeyMutation.mutate()} disabled={createKeyMutation.isPending}>
-        Create API key
-      </button>
+      <fieldset className="stack">
+        <legend>Create API key</legend>
+        <label>
+          <input
+            type="radio"
+            name={`expire-${identityId}`}
+            checked={expireMode === "never"}
+            onChange={() => setExpireMode("never")}
+          />{" "}
+          Never expires
+        </label>
+        <label>
+          <input
+            type="radio"
+            name={`expire-${identityId}`}
+            checked={expireMode === "expires"}
+            onChange={() => setExpireMode("expires")}
+          />{" "}
+          Expires on
+        </label>
+        {expireMode === "expires" ? (
+          <input
+            type="datetime-local"
+            value={expiresAtLocal}
+            onChange={(event) => setExpiresAtLocal(event.target.value)}
+          />
+        ) : null}
+        <button type="button" onClick={() => createKeyMutation.mutate()} disabled={createKeyMutation.isPending}>
+          Create API key
+        </button>
+      </fieldset>
       {newKey ? (
         <p className="muted">
           Copy now — shown once: <code>{newKey}</code>

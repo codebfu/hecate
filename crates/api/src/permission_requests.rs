@@ -116,6 +116,22 @@ pub async fn list_requests(
     pool: &PgPool,
     query: &PermissionRequestListQuery,
 ) -> ApiResult<PaginatedResponse<PermissionRequestDetail>> {
+    list_requests_filtered(pool, query, None).await
+}
+
+pub async fn list_mine(
+    pool: &PgPool,
+    identity_id: Uuid,
+    query: &PermissionRequestListQuery,
+) -> ApiResult<PaginatedResponse<PermissionRequestDetail>> {
+    list_requests_filtered(pool, query, Some(identity_id)).await
+}
+
+async fn list_requests_filtered(
+    pool: &PgPool,
+    query: &PermissionRequestListQuery,
+    identity_filter: Option<Uuid>,
+) -> ApiResult<PaginatedResponse<PermissionRequestDetail>> {
     let (limit, mut offset) = pagination::resolve_list_pagination(query.limit, query.offset);
     let status_filter = query.status.as_deref().unwrap_or("pending");
 
@@ -124,46 +140,98 @@ pub async fn list_requests(
     }
 
     if let Some(request_id) = query.request_id {
-        if let Some(index) = request_index(pool, request_id, status_filter).await? {
+        if let Some(index) =
+            request_index(pool, request_id, status_filter, identity_filter).await?
+        {
             offset = pagination::page_offset_for_index(index, limit);
         }
     }
 
-    let total: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*)::bigint
-         FROM ai_permission_requests pr
-         JOIN ai_identities ai ON ai.id = pr.ai_identity_id
-         WHERE ai.deleted_at IS NULL
-           AND pr.status = $1::permission_request_status",
-    )
-    .bind(status_filter)
-    .fetch_one(pool)
-    .await?;
+    let total: i64 = match identity_filter {
+        Some(identity_id) => {
+            sqlx::query_scalar(
+                "SELECT COUNT(*)::bigint
+                 FROM ai_permission_requests pr
+                 JOIN ai_identities ai ON ai.id = pr.ai_identity_id
+                 WHERE ai.deleted_at IS NULL
+                   AND pr.status = $1::permission_request_status
+                   AND pr.ai_identity_id = $2",
+            )
+            .bind(status_filter)
+            .bind(identity_id)
+            .fetch_one(pool)
+            .await?
+        }
+        None => {
+            sqlx::query_scalar(
+                "SELECT COUNT(*)::bigint
+                 FROM ai_permission_requests pr
+                 JOIN ai_identities ai ON ai.id = pr.ai_identity_id
+                 WHERE ai.deleted_at IS NULL
+                   AND pr.status = $1::permission_request_status",
+            )
+            .bind(status_filter)
+            .fetch_one(pool)
+            .await?
+        }
+    };
 
-    let rows: Vec<PermissionRequestRow> = sqlx::query_as(
-        "SELECT pr.id,
-                pr.ai_identity_id,
-                ai.name AS ai_identity_name,
-                pr.requested_changes,
-                pr.reason,
-                pr.request_class::text AS request_class,
-                pr.review_reason,
-                pr.status::text AS status,
-                pr.reviewed_by,
-                pr.reviewed_at,
-                pr.created_at
-         FROM ai_permission_requests pr
-         JOIN ai_identities ai ON ai.id = pr.ai_identity_id
-         WHERE ai.deleted_at IS NULL
-           AND pr.status = $1::permission_request_status
-         ORDER BY pr.created_at, pr.id
-         LIMIT $2 OFFSET $3",
-    )
-    .bind(status_filter)
-    .bind(limit)
-    .bind(offset)
-    .fetch_all(pool)
-    .await?;
+    let rows: Vec<PermissionRequestRow> = match identity_filter {
+        Some(identity_id) => {
+            sqlx::query_as(
+                "SELECT pr.id,
+                        pr.ai_identity_id,
+                        ai.name AS ai_identity_name,
+                        pr.requested_changes,
+                        pr.reason,
+                        pr.request_class::text AS request_class,
+                        pr.review_reason,
+                        pr.status::text AS status,
+                        pr.reviewed_by,
+                        pr.reviewed_at,
+                        pr.created_at
+                 FROM ai_permission_requests pr
+                 JOIN ai_identities ai ON ai.id = pr.ai_identity_id
+                 WHERE ai.deleted_at IS NULL
+                   AND pr.status = $1::permission_request_status
+                   AND pr.ai_identity_id = $2
+                 ORDER BY pr.created_at, pr.id
+                 LIMIT $3 OFFSET $4",
+            )
+            .bind(status_filter)
+            .bind(identity_id)
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(pool)
+            .await?
+        }
+        None => {
+            sqlx::query_as(
+                "SELECT pr.id,
+                        pr.ai_identity_id,
+                        ai.name AS ai_identity_name,
+                        pr.requested_changes,
+                        pr.reason,
+                        pr.request_class::text AS request_class,
+                        pr.review_reason,
+                        pr.status::text AS status,
+                        pr.reviewed_by,
+                        pr.reviewed_at,
+                        pr.created_at
+                 FROM ai_permission_requests pr
+                 JOIN ai_identities ai ON ai.id = pr.ai_identity_id
+                 WHERE ai.deleted_at IS NULL
+                   AND pr.status = $1::permission_request_status
+                 ORDER BY pr.created_at, pr.id
+                 LIMIT $2 OFFSET $3",
+            )
+            .bind(status_filter)
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(pool)
+            .await?
+        }
+    };
 
     let mut items = Vec::with_capacity(rows.len());
     for row in rows {
@@ -178,23 +246,52 @@ pub async fn list_requests(
     })
 }
 
-async fn request_index(pool: &PgPool, request_id: Uuid, status: &str) -> ApiResult<Option<i64>> {
-    let index: Option<i64> = sqlx::query_scalar(
-        "SELECT position
-         FROM (
-             SELECT pr.id,
-                    ROW_NUMBER() OVER (ORDER BY pr.created_at, pr.id) - 1 AS position
-             FROM ai_permission_requests pr
-             JOIN ai_identities ai ON ai.id = pr.ai_identity_id
-             WHERE ai.deleted_at IS NULL
-               AND pr.status = $1::permission_request_status
-         ) ranked
-         WHERE id = $2",
-    )
-    .bind(status)
-    .bind(request_id)
-    .fetch_optional(pool)
-    .await?;
+async fn request_index(
+    pool: &PgPool,
+    request_id: Uuid,
+    status: &str,
+    identity_filter: Option<Uuid>,
+) -> ApiResult<Option<i64>> {
+    let index: Option<i64> = match identity_filter {
+        Some(identity_id) => {
+            sqlx::query_scalar(
+                "SELECT position
+                 FROM (
+                     SELECT pr.id,
+                            ROW_NUMBER() OVER (ORDER BY pr.created_at, pr.id) - 1 AS position
+                     FROM ai_permission_requests pr
+                     JOIN ai_identities ai ON ai.id = pr.ai_identity_id
+                     WHERE ai.deleted_at IS NULL
+                       AND pr.status = $1::permission_request_status
+                       AND pr.ai_identity_id = $2
+                 ) ranked
+                 WHERE id = $3",
+            )
+            .bind(status)
+            .bind(identity_id)
+            .bind(request_id)
+            .fetch_optional(pool)
+            .await?
+        }
+        None => {
+            sqlx::query_scalar(
+                "SELECT position
+                 FROM (
+                     SELECT pr.id,
+                            ROW_NUMBER() OVER (ORDER BY pr.created_at, pr.id) - 1 AS position
+                     FROM ai_permission_requests pr
+                     JOIN ai_identities ai ON ai.id = pr.ai_identity_id
+                     WHERE ai.deleted_at IS NULL
+                       AND pr.status = $1::permission_request_status
+                 ) ranked
+                 WHERE id = $2",
+            )
+            .bind(status)
+            .bind(request_id)
+            .fetch_optional(pool)
+            .await?
+        }
+    };
     Ok(index)
 }
 

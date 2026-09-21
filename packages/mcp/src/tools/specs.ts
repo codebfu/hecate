@@ -33,6 +33,10 @@ export const TOOL_SPECS: RegisteredToolSpec[] = [
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
   },
   {
+    name: "list_my_permission_requests",
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+  },
+  {
     name: "list_authz_catalog",
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
   },

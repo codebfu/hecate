@@ -16,6 +16,11 @@ export const FALLBACK_AGENT_COMMANDS: CommandOption[] = [
     description: "Request permanent permission changes (operator approval)",
     riskLevel: "low",
   },
+  {
+    id: "permissions.requests.mine",
+    description: "List permission requests owned by the calling AI identity",
+    riskLevel: "low",
+  },
 ];
 
 export function partitionCommandCatalogue(definitions: CommandDefinitionSummary[]): {
