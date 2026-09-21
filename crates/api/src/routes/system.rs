@@ -4,9 +4,11 @@
 use axum::extract::State;
 use axum::routing::get;
 use axum::{Json, Router};
+use axum_extra::extract::CookieJar;
 use hecate_protocol::backup::BACKUP_FORMAT_VERSION_CURRENT;
 use serde::Serialize;
 
+use crate::admin_auth;
 use crate::error::ApiResult;
 use crate::state::AppState;
 
@@ -22,7 +24,11 @@ pub fn router() -> Router<AppState> {
     Router::new().route("/api/v1/system/version", get(version))
 }
 
-async fn version(State(state): State<AppState>) -> ApiResult<Json<VersionResponse>> {
+async fn version(
+    State(state): State<AppState>,
+    jar: CookieJar,
+) -> ApiResult<Json<VersionResponse>> {
+    admin_auth::require_admin_read(&state, &jar).await?;
     let schema_version: i64 = sqlx::query_scalar(
         "SELECT COALESCE(MAX(version), 0) FROM _sqlx_migrations",
     )

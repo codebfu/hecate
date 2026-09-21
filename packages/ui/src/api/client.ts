@@ -140,6 +140,7 @@ export interface AiApiKeySummary {
   created_at: string;
   last_used_at?: string | null;
   revoked_at?: string | null;
+  expires_at?: string | null;
 }
 
 export type TagMatchMode = "any" | "all";
@@ -971,8 +972,13 @@ export class ApiClient {
     return this.request<AiApiKeySummary[]>("GET", `/admin/ai-identities/${identityId}/api-keys`);
   }
 
-  async createAiApiKey(identityId: string): Promise<{ id: string; api_key: string; prefix: string }> {
-    return this.request("POST", `/admin/ai-identities/${identityId}/api-keys`);
+  async createAiApiKey(
+    identityId: string,
+    expiresAt?: string | null,
+  ): Promise<{ id: string; api_key: string; prefix: string; expires_at?: string | null }> {
+    return this.request("POST", `/admin/ai-identities/${identityId}/api-keys`, {
+      expires_at: expiresAt ?? null,
+    });
   }
 
   async revokeAiApiKey(identityId: string, keyId: string): Promise<void> {

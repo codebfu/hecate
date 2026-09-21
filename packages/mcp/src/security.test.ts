@@ -7,6 +7,7 @@ import {
   extractBearerToken,
   hashApiKey,
   hostHeaderValidation,
+  resolveAllowedHosts,
   verifySessionBearer,
 } from "./index.js";
 import { executeCommandInputSchema } from "./tools/execute_command.js";
@@ -39,6 +40,30 @@ describe("verifySessionBearer", () => {
         expect(verifySessionBearer(entry, `${apiKey}-tampered`)).toBe(false);
       }),
     );
+  });
+});
+
+describe("resolveAllowedHosts", () => {
+  it("uses explicit MCP_ALLOWED_HOSTS when set", () => {
+    expect(
+      resolveAllowedHosts({
+        MCP_ALLOWED_HOSTS: "hecate.example,mcp",
+        HECATE_PUBLIC_BASE_URL: "https://ignored.example",
+      }),
+    ).toEqual(["hecate.example", "mcp"]);
+  });
+
+  it("derives public hostname without localhost when public URL is set", () => {
+    expect(
+      resolveAllowedHosts({
+        HECATE_PUBLIC_BASE_URL: "https://hecate.codebfu.fr:18443",
+        MCP_HOST: "0.0.0.0",
+      }),
+    ).toEqual(["hecate.codebfu.fr"]);
+  });
+
+  it("includes loopback when public URL is absent", () => {
+    expect(resolveAllowedHosts({})).toEqual(["127.0.0.1", "localhost", "[::1]"]);
   });
 });
 

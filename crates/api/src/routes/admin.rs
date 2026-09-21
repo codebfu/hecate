@@ -1344,8 +1344,8 @@ async fn list_ai_api_keys(
     admin_auth::require_admin_read(&state, &jar).await?;
     let rows: Vec<serde_json::Value> = sqlx::query_scalar(
         "SELECT row_to_json(t) FROM (
-            SELECT id, prefix, created_at, last_used_at, revoked_at,
-                   (revoked_at IS NULL) AS active
+            SELECT id, prefix, created_at, last_used_at, revoked_at, expires_at,
+                   (revoked_at IS NULL AND (expires_at IS NULL OR expires_at > now())) AS active
             FROM ai_api_keys WHERE ai_identity_id = $1 ORDER BY created_at DESC
          ) t",
     )
@@ -1360,6 +1360,7 @@ async fn create_ai_api_key(
     jar: CookieJar,
     headers: HeaderMap,
     Path(id): Path<Uuid>,
+    body: Result<Json<serde_json::Value>, axum::extract::rejection::JsonRejection>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let admin = admin_auth::require_admin(&state, &jar, &headers).await?;
     let exists: bool = sqlx::query_scalar(
@@ -1371,6 +1372,28 @@ async fn create_ai_api_key(
     if !exists {
         return Err(ApiError::NotFound);
     }
+
+    let body_value = body.ok().map(|Json(value)| value).unwrap_or(serde_json::json!({}));
+    let expires_at = match body_value.get("expires_at") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(raw)) => {
+            let parsed = chrono::DateTime::parse_from_rfc3339(raw)
+                .map_err(|_| ApiError::BadRequest("invalid expires_at".into()))?
+                .with_timezone(&chrono::Utc);
+            if parsed <= chrono::Utc::now() {
+                return Err(ApiError::BadRequest(
+                    "expires_at must be in the future".into(),
+                ));
+            }
+            Some(parsed)
+        }
+        Some(_) => {
+            return Err(ApiError::BadRequest(
+                "expires_at must be an RFC3339 string or null".into(),
+            ));
+        }
+    };
+
     let mut raw = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut raw);
     let api_key = format!("hecate_{}", hex::encode(raw));
@@ -1378,12 +1401,14 @@ async fn create_ai_api_key(
     let key_hmac = hmac_sha256_hex(&state.config.api_key_pepper, &api_key);
     let key_id = Uuid::new_v4();
     sqlx::query(
-        "INSERT INTO ai_api_keys (id, ai_identity_id, key_hmac, prefix) VALUES ($1, $2, $3, $4)",
+        "INSERT INTO ai_api_keys (id, ai_identity_id, key_hmac, prefix, expires_at)
+         VALUES ($1, $2, $3, $4, $5)",
     )
     .bind(key_id)
     .bind(id)
     .bind(&key_hmac)
     .bind(&prefix)
+    .bind(expires_at)
     .execute(&state.pool)
     .await?;
     append_audit(
@@ -1392,13 +1417,18 @@ async fn create_ai_api_key(
         "ai_api_key.create",
         &key_id.to_string(),
         "",
-        &serde_json::json!({ "ai_identity_id": id, "prefix": prefix }),
+        &serde_json::json!({
+            "ai_identity_id": id,
+            "prefix": prefix,
+            "expires_at": expires_at,
+        }),
     )
     .await?;
     Ok(Json(serde_json::json!({
         "id": key_id,
         "api_key": api_key,
         "prefix": prefix,
+        "expires_at": expires_at,
     })))
 }
 

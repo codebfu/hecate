@@ -207,7 +207,7 @@ Static skills and rules (`hecate://skill/*`, `hecate://rule/*`) plus live permis
 | Connection refused / timeout | Firewall, wrong host/port, or stack not running |
 | TLS / certificate error | Wrong cert on host (see [install.md](install.md) / Ansible TLS notes) |
 | `401 Unauthorized` | Missing or invalid AI API key; revoked key |
-| `403 Forbidden: invalid Host header` | `MCP_ALLOWED_HOSTS` on server missing the public FQDN |
+| `403 Forbidden: invalid Host header` | Public FQDN missing from derived/`MCP_ALLOWED_HOSTS` allowlist; set `HECATE_PUBLIC_BASE_URL` or override `MCP_ALLOWED_HOSTS` |
 | `503 missing internal token` | Server misconfiguration (`HECATE_INTERNAL_TOKEN` unset) |
 | Claude: server skipped / `url` without `type` | Add `"type": "http"` to the Claude Code entry |
 | Cursor: tools empty / server disabled | Enable the server in **Customize**; check MCP Logs |

@@ -30,6 +30,7 @@ pub async fn verify_internal_token(
          JOIN ai_identities i ON i.id = k.ai_identity_id
          WHERE k.key_hmac = $1
            AND k.revoked_at IS NULL
+           AND (k.expires_at IS NULL OR k.expires_at > now())
            AND i.deleted_at IS NULL
            AND i.active = true",
     )

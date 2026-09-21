@@ -377,7 +377,7 @@ fn ensure_access_grant_mutable(id: Uuid) -> ApiResult<()> {
     Ok(())
 }
 
-/// Ensures every AI identity has the hidden bootstrap grant (system.info + permissions.request).
+/// Ensures every AI identity has the hidden bootstrap grant (system.info + permissions.request + permissions.requests.mine).
 pub async fn ensure_bootstrap_assignment(pool: &PgPool, identity_id: Uuid) -> ApiResult<()> {
     sqlx::query(
         "INSERT INTO ai_grant_assignments (

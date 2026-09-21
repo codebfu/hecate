@@ -38,6 +38,39 @@ export function registerRequestPermissionsTool(server: McpServer, client: Hecate
   return spec;
 }
 
+export function registerListMyPermissionRequestsTool(server: McpServer, client: HecateApiClient) {
+  const spec = findToolSpec("list_my_permission_requests")!;
+
+  server.registerTool(
+    spec.name,
+    {
+      description:
+        "List your own permission requests (pending/approved/rejected), including review_reason when rejected. Bootstrap platform command permissions.requests.mine.",
+      inputSchema: z.object({
+        status: z.enum(["pending", "approved", "rejected"]).optional(),
+        limit: z.number().int().min(1).max(100).optional(),
+        offset: z.number().int().min(0).optional(),
+        request_id: z.string().uuid().optional(),
+      }),
+      annotations: spec.annotations,
+    },
+    async ({ status, limit, offset, request_id }) => {
+      const response = await client.executePlatformCommand("permissions.requests.mine", {
+        status,
+        limit,
+        offset,
+        request_id,
+      });
+      return formatUntrustedToolResult(
+        { command: "permissions.requests.mine" },
+        response.result,
+      );
+    },
+  );
+
+  return spec;
+}
+
 export function registerReadGrantAssignmentsTool(server: McpServer, client: HecateApiClient) {
   const spec = findToolSpec("read_grant_assignments")!;
 
@@ -660,7 +693,7 @@ const authzToolDefinitions = [
     tool: "add_grant_assignments",
     command: "admin.authz.assignments.add",
     description:
-      "Add or update grant assignments on a target identity (immediate effect). Requires admin.authz.assignments.add. See hecate://rule/authz-admin.",
+      "Add or update grant assignments on another identity (immediate effect). Cannot target self. Requires admin.authz.assignments.add. See hecate://rule/authz-admin.",
     inputSchema: z.object({
       identity_id: z.string().uuid().optional(),
       access_grant_id: z.string().uuid(),
@@ -673,7 +706,7 @@ const authzToolDefinitions = [
     tool: "remove_grant_assignments",
     command: "admin.authz.assignments.remove",
     description:
-      "Remove grant assignments from a target identity (immediate effect). Cannot target self. Requires admin.authz.assignments.remove.",
+      "Remove grant assignments from another identity (immediate effect). Cannot target self. Requires admin.authz.assignments.remove.",
     inputSchema: z.object({
       identity_id: z.string().uuid().optional(),
       assignment_ids: z.array(z.string().uuid()).min(1),

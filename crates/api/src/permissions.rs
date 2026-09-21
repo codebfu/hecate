@@ -858,7 +858,11 @@ mod tests {
 
     fn default_rules() -> CapabilityProfileRules {
         CapabilityProfileRules {
-            allowed_commands: vec!["system.info".into(), "permissions.request".into()],
+            allowed_commands: vec![
+                "system.info".into(),
+                "permissions.request".into(),
+                "permissions.requests.mine".into(),
+            ],
             allowed_admin_commands: vec![],
             shell_policy: ShellPolicy::default(),
             elevation_policy: ElevationPolicy::default(),
