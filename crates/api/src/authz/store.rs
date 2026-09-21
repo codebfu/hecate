@@ -935,6 +935,14 @@ pub async fn set_grant_assignments(
     input: SetGrantAssignmentsInput,
 ) -> ApiResult<Vec<ResolvedGrantAssignment>> {
     ensure_identity_exists(pool, identity_id).await?;
+    let existing_grant_ids: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT access_grant_id FROM ai_grant_assignments WHERE ai_identity_id = $1",
+    )
+    .bind(identity_id)
+    .fetch_all(pool)
+    .await?;
+    let existing: std::collections::HashSet<Uuid> = existing_grant_ids.into_iter().collect();
+
     for assignment in &input.assignments {
         if assignment_targets_bootstrap_grant(assignment.access_grant_id) {
             return Err(ApiError::BadRequest(
@@ -942,7 +950,9 @@ pub async fn set_grant_assignments(
             ));
         }
         let detail = load_access_grant_detail(pool, assignment.access_grant_id).await?;
-        if detail.grant.request_scoped {
+        // Request-scoped grants may only be attached via permission-request approval.
+        // Allow re-saving ones already assigned to this identity (UI full replace).
+        if detail.grant.request_scoped && !existing.contains(&assignment.access_grant_id) {
             return Err(ApiError::BadRequest(
                 "cannot assign request-scoped access grants directly; promote to catalog first".into(),
             ));

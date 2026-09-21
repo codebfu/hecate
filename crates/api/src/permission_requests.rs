@@ -16,7 +16,7 @@ use crate::error::{ApiError, ApiResult};
 use crate::pagination::{self, PaginatedResponse};
 use crate::permission_request_workflow::{
     ai_may_approve_standard_tier1, apply_approved_changes, build_preview,
-    validate_and_classify, validate_reason, validate_remove_assignments,
+    validate_and_classify, validate_optional_reason, validate_reason, validate_remove_assignments,
 };
 
 #[derive(Debug, Deserialize)]
@@ -50,7 +50,7 @@ pub async fn create_request(
 ) -> ApiResult<Uuid> {
     validate_reason(&reason)?;
     validate_remove_assignments(pool, identity_id, &requested_changes).await?;
-    let request_class = validate_and_classify(pool, &requested_changes).await?;
+    let request_class = validate_and_classify(pool, identity_id, &requested_changes).await?;
 
     let active: bool = sqlx::query_scalar(
         "SELECT active FROM ai_identities WHERE id = $1 AND deleted_at IS NULL",
@@ -430,6 +430,8 @@ pub async fn reject_request(
     if block_self_for_ai == Some(row.ai_identity_id) {
         return Err(ApiError::Forbidden);
     }
+
+    let review_reason = validate_optional_reason(review_reason.as_deref())?;
 
     let updated = sqlx::query(
         "UPDATE ai_permission_requests

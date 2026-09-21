@@ -130,12 +130,12 @@ function RequestDetailPanel({
         </div>
         <div>
           <dt>Reason</dt>
-          <dd>{request.reason}</dd>
+          <dd className="permission-request-reason-full">{request.reason}</dd>
         </div>
         {request.review_reason ? (
           <div>
             <dt>Review reason</dt>
-            <dd>{request.review_reason}</dd>
+            <dd className="permission-request-reason-full">{request.review_reason}</dd>
           </div>
         ) : null}
       </dl>
@@ -298,11 +298,16 @@ export function PermissionRequestsPage() {
   }
 
   function onReject(requestId: string) {
-    const reason = window.prompt("Optional rejection reason:");
+    const reason = window.prompt("Optional rejection reason (max 2000 characters):");
     if (reason === null) {
       return;
     }
-    rejectMutation.mutate({ requestId, reason: reason.trim() || undefined });
+    const trimmed = reason.trim();
+    if (trimmed.length > 2000) {
+      toast.error("Rejection reason must be at most 2000 characters.");
+      return;
+    }
+    rejectMutation.mutate({ requestId, reason: trimmed || undefined });
   }
 
   return (
@@ -385,7 +390,11 @@ export function PermissionRequestsPage() {
                         </span>
                         {hasAutoApproveWarning ? <span title="Auto-approval requested"> ⚠</span> : null}
                       </td>
-                      <td>{request.reason}</td>
+                      <td>
+                        <span className="permission-request-reason-preview" title={request.reason}>
+                          {request.reason}
+                        </span>
+                      </td>
                       <td>{request.status}</td>
                       <td>
                         {isPending ? (
