@@ -111,7 +111,7 @@ impl AppConfig {
             command_artifact_ttl_hours,
             release_signing_public_key_b64: std::env::var("RELEASE_SIGNING_PUBLIC_KEY_B64")
                 .unwrap_or_default(),
-            hecate_app_tag: std::env::var("HECATE_APP_TAG").unwrap_or_else(|_| "1.1.0".into()),
+            hecate_app_tag: std::env::var("HECATE_APP_TAG").unwrap_or_else(|_| "1.1.1".into()),
             server_update_trigger_path: PathBuf::from(
                 std::env::var("SERVER_UPDATE_TRIGGER_PATH")
                     .unwrap_or_else(|_| "/opt/hecate/run/server-update.trigger".into()),

@@ -18,7 +18,7 @@ export function registerRequestPermissionsTool(server: McpServer, client: Hecate
       description:
         "Submit a permanent permission change request for operator approval. Additive payload (grant assignments, not monolithic rules). One pending standard request per identity. Read hecate://skill/authz-model and hecate://skill/permission-requests first.",
       inputSchema: z.object({
-        reason: z.string().min(8),
+        reason: z.string().min(8).max(2000),
         requested_changes: permissionChangesSchema,
       }),
       annotations: spec.annotations,
@@ -189,7 +189,7 @@ export function registerRejectPermissionRequestTool(server: McpServer, client: H
       description: "Reject a pending permission request without changing current rules.",
       inputSchema: z.object({
         request_id: z.string().uuid(),
-        reason: z.string().optional(),
+        reason: z.string().max(2000).optional(),
       }),
       annotations: spec.annotations,
     },

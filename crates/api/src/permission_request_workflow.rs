@@ -23,7 +23,8 @@ use crate::machines;
 use crate::server_settings;
 
 const MIN_REASON_LEN: usize = 10;
-const MAX_REASON_LEN: usize = 2000;
+/// Hard cap on request/review reason size (UTF-8 bytes) to bound request/DB/UI payloads.
+pub const MAX_REASON_LEN: usize = 2000;
 const AUDIT_LIST_CMD: &str = "admin.audit.list";
 
 pub fn validate_reason(reason: &str) -> ApiResult<()> {
@@ -46,8 +47,26 @@ pub fn validate_reason(reason: &str) -> ApiResult<()> {
     Ok(())
 }
 
+/// Optional review/reject reason: empty becomes unused; non-empty must not exceed [`MAX_REASON_LEN`].
+pub fn validate_optional_reason(reason: Option<&str>) -> ApiResult<Option<String>> {
+    let Some(raw) = reason else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if trimmed.len() > MAX_REASON_LEN {
+        return Err(ApiError::BadRequest(format!(
+            "reason must be at most {MAX_REASON_LEN} characters"
+        )));
+    }
+    Ok(Some(trimmed.to_string()))
+}
+
 pub async fn validate_and_classify(
     pool: &PgPool,
+    identity_id: Uuid,
     changes: &PermissionRequestChanges,
 ) -> ApiResult<PermissionRequestClass> {
     if changes.propose_fleet_scopes.is_empty()
@@ -81,27 +100,29 @@ pub async fn validate_and_classify(
     }
 
     for grant in &changes.propose_access_grants {
-        let profile = resolve_profile_for_ref(pool, changes, &grant.capability_profile).await?;
+        let profile =
+            resolve_profile_for_ref(pool, identity_id, changes, &grant.capability_profile).await?;
         classify_profile_flags(
             &profile,
             &mut has_admin_cmds,
             &mut has_standard_cmds,
             &mut force_admin,
         );
-        if scope_ref_is_fleet_wildcard(pool, changes, &grant.fleet_scope).await? {
+        if scope_ref_is_fleet_wildcard(pool, identity_id, changes, &grant.fleet_scope).await? {
             force_admin = true;
         }
     }
 
     for assignment in &changes.add_assignments {
-        let profile = resolve_profile_for_assignment(pool, changes, assignment).await?;
+        let profile =
+            resolve_profile_for_assignment(pool, identity_id, changes, assignment).await?;
         classify_profile_flags(
             &profile,
             &mut has_admin_cmds,
             &mut has_standard_cmds,
             &mut force_admin,
         );
-        if assignment_scope_is_fleet_wildcard(pool, changes, assignment).await? {
+        if assignment_scope_is_fleet_wildcard(pool, identity_id, changes, assignment).await? {
             force_admin = true;
         }
     }
@@ -138,6 +159,7 @@ fn classify_profile_flags(
 
 async fn scope_ref_is_fleet_wildcard(
     pool: &PgPool,
+    requester: Uuid,
     changes: &PermissionRequestChanges,
     entity_ref: &EntityRef,
 ) -> ApiResult<bool> {
@@ -149,7 +171,7 @@ async fn scope_ref_is_fleet_wildcard(
             .map(|s| machine_ids_allow_all(&s.machine_ids))
             .unwrap_or(false)),
         EntityRef::Id { id } => {
-            reject_if_request_scoped_scope(pool, *id).await?;
+            reject_if_foreign_request_scoped_scope(pool, *id, requester).await?;
             let scope = store::get_fleet_scope(pool, *id).await?;
             Ok(machine_ids_allow_all(&scope.machine_ids))
         }
@@ -158,6 +180,7 @@ async fn scope_ref_is_fleet_wildcard(
 
 async fn assignment_scope_is_fleet_wildcard(
     pool: &PgPool,
+    requester: Uuid,
     changes: &PermissionRequestChanges,
     assignment: &RequestedAssignment,
 ) -> ApiResult<bool> {
@@ -168,10 +191,10 @@ async fn assignment_scope_is_fleet_wildcard(
                 .iter()
                 .find(|g| &g.key == key)
                 .ok_or_else(|| ApiError::BadRequest(format!("unknown proposed grant key: {key}")))?;
-            scope_ref_is_fleet_wildcard(pool, changes, &grant.fleet_scope).await
+            scope_ref_is_fleet_wildcard(pool, requester, changes, &grant.fleet_scope).await
         }
         EntityRef::Id { id } => {
-            reject_if_request_scoped_grant(pool, *id).await?;
+            reject_if_foreign_request_scoped_grant(pool, *id, requester).await?;
             let detail = store::get_access_grant(pool, *id).await?;
             Ok(machine_ids_allow_all(&detail.fleet_scope.machine_ids))
         }
@@ -265,7 +288,7 @@ async fn simulate_effective_rights_after(
 
     for assignment in &changes.add_assignments {
         let (profile, scope, grant_id) =
-            resolve_assignment_preview_parts(pool, changes, assignment).await?;
+            resolve_assignment_preview_parts(pool, identity_id, changes, assignment).await?;
         let replacing = grant_id.is_some_and(|id| kept_grant_ids.contains(&id));
         if let Some(id) = grant_id {
             kept_grant_ids.insert(id);
@@ -344,6 +367,7 @@ fn merge_preview_strings(target: &mut Vec<String>, source: &[String]) {
 
 async fn resolve_assignment_preview_parts(
     pool: &PgPool,
+    requester: Uuid,
     changes: &PermissionRequestChanges,
     assignment: &RequestedAssignment,
 ) -> ApiResult<(
@@ -353,7 +377,7 @@ async fn resolve_assignment_preview_parts(
 )> {
     match &assignment.access_grant {
         EntityRef::Id { id } => {
-            reject_if_request_scoped_grant(pool, *id).await?;
+            reject_if_foreign_request_scoped_grant(pool, *id, requester).await?;
             let detail = store::get_access_grant(pool, *id).await?;
             Ok((
                 ProposedCapabilityProfile {
@@ -379,8 +403,9 @@ async fn resolve_assignment_preview_parts(
                 .iter()
                 .find(|g| &g.key == key)
                 .ok_or_else(|| ApiError::BadRequest(format!("unknown proposed grant key: {key}")))?;
-            let profile = resolve_profile_for_ref(pool, changes, &grant.capability_profile).await?;
-            let scope = resolve_scope_for_preview(pool, changes, &grant.fleet_scope).await?;
+            let profile =
+                resolve_profile_for_ref(pool, requester, changes, &grant.capability_profile).await?;
+            let scope = resolve_scope_for_preview(pool, requester, changes, &grant.fleet_scope).await?;
             Ok((profile, scope, None))
         }
     }
@@ -388,6 +413,7 @@ async fn resolve_assignment_preview_parts(
 
 async fn resolve_scope_for_preview(
     pool: &PgPool,
+    requester: Uuid,
     changes: &PermissionRequestChanges,
     entity_ref: &EntityRef,
 ) -> ApiResult<hecate_protocol::authz::FleetScope> {
@@ -413,7 +439,7 @@ async fn resolve_scope_for_preview(
             })
         }
         EntityRef::Id { id } => {
-            reject_if_request_scoped_scope(pool, *id).await?;
+            reject_if_foreign_request_scoped_scope(pool, *id, requester).await?;
             store::get_fleet_scope(pool, *id).await
         }
     }
@@ -549,9 +575,11 @@ pub async fn apply_approved_changes(
 
     let mut grant_ids: HashMap<String, Uuid> = HashMap::new();
     for grant in &changes.propose_access_grants {
-        let fleet_scope_id = resolve_scope_id(pool, changes, &grant.fleet_scope, &scope_ids).await?;
+        let fleet_scope_id =
+            resolve_scope_id(pool, identity_id, changes, &grant.fleet_scope, &scope_ids).await?;
         let capability_profile_id =
-            resolve_profile_id(pool, changes, &grant.capability_profile, &profile_ids).await?;
+            resolve_profile_id(pool, identity_id, changes, &grant.capability_profile, &profile_ids)
+                .await?;
         let id = Uuid::new_v4();
         sqlx::query(
             "INSERT INTO access_grants (
@@ -572,7 +600,8 @@ pub async fn apply_approved_changes(
 
     for assignment in &changes.add_assignments {
         let access_grant_id =
-            resolve_grant_id(pool, changes, &assignment.access_grant, &grant_ids).await?;
+            resolve_grant_id(pool, identity_id, changes, &assignment.access_grant, &grant_ids)
+                .await?;
         sqlx::query(
             "INSERT INTO ai_grant_assignments (
                 ai_identity_id, access_grant_id,
@@ -641,6 +670,7 @@ fn validate_proposed_profile(profile: &ProposedCapabilityProfile) -> ApiResult<(
 
 async fn resolve_profile_for_ref(
     pool: &PgPool,
+    requester: Uuid,
     changes: &PermissionRequestChanges,
     entity_ref: &EntityRef,
 ) -> ApiResult<ProposedCapabilityProfile> {
@@ -652,7 +682,7 @@ async fn resolve_profile_for_ref(
             .cloned()
             .ok_or_else(|| ApiError::BadRequest(format!("unknown proposed profile key: {key}"))),
         EntityRef::Id { id } => {
-            reject_if_request_scoped_profile(pool, *id).await?;
+            reject_if_foreign_request_scoped_profile(pool, *id, requester).await?;
             let profile = store::get_capability_profile(pool, *id).await?;
             Ok(ProposedCapabilityProfile {
                 key: id.to_string(),
@@ -673,6 +703,7 @@ async fn resolve_profile_for_ref(
 
 async fn resolve_profile_for_assignment(
     pool: &PgPool,
+    requester: Uuid,
     changes: &PermissionRequestChanges,
     assignment: &RequestedAssignment,
 ) -> ApiResult<ProposedCapabilityProfile> {
@@ -684,7 +715,7 @@ async fn resolve_profile_for_assignment(
             .find(|g| &g.key == key)
             .ok_or_else(|| ApiError::BadRequest(format!("unknown proposed grant key: {key}")))?,
         EntityRef::Id { id } => {
-            reject_if_request_scoped_grant(pool, *id).await?;
+            reject_if_foreign_request_scoped_grant(pool, *id, requester).await?;
             let detail = store::get_access_grant(pool, *id).await?;
             return Ok(ProposedCapabilityProfile {
                 key: detail.capability_profile.id.to_string(),
@@ -701,12 +732,17 @@ async fn resolve_profile_for_assignment(
             });
         }
     };
-    resolve_profile_for_ref(pool, changes, &grant.capability_profile).await
+    resolve_profile_for_ref(pool, requester, changes, &grant.capability_profile).await
 }
 
-async fn reject_if_request_scoped_scope(pool: &PgPool, id: Uuid) -> ApiResult<()> {
+/// Reject request-scoped entities that are not owned by the requester (cross-identity IDOR).
+async fn reject_if_foreign_request_scoped_scope(
+    pool: &PgPool,
+    id: Uuid,
+    requester: Uuid,
+) -> ApiResult<()> {
     let scope = store::get_fleet_scope(pool, id).await?;
-    if scope.request_scoped {
+    if scope.request_scoped && scope.owner_ai_identity_id != Some(requester) {
         return Err(ApiError::BadRequest(
             "cannot reference request-scoped fleet scopes; promote to catalog first".into(),
         ));
@@ -714,9 +750,13 @@ async fn reject_if_request_scoped_scope(pool: &PgPool, id: Uuid) -> ApiResult<()
     Ok(())
 }
 
-async fn reject_if_request_scoped_profile(pool: &PgPool, id: Uuid) -> ApiResult<()> {
+async fn reject_if_foreign_request_scoped_profile(
+    pool: &PgPool,
+    id: Uuid,
+    requester: Uuid,
+) -> ApiResult<()> {
     let profile = store::get_capability_profile(pool, id).await?;
-    if profile.request_scoped {
+    if profile.request_scoped && profile.owner_ai_identity_id != Some(requester) {
         return Err(ApiError::BadRequest(
             "cannot reference request-scoped capability profiles; promote to catalog first".into(),
         ));
@@ -724,9 +764,13 @@ async fn reject_if_request_scoped_profile(pool: &PgPool, id: Uuid) -> ApiResult<
     Ok(())
 }
 
-async fn reject_if_request_scoped_grant(pool: &PgPool, id: Uuid) -> ApiResult<()> {
+async fn reject_if_foreign_request_scoped_grant(
+    pool: &PgPool,
+    id: Uuid,
+    requester: Uuid,
+) -> ApiResult<()> {
     let detail = store::get_access_grant(pool, id).await?;
-    if detail.grant.request_scoped {
+    if detail.grant.request_scoped && detail.grant.owner_ai_identity_id != Some(requester) {
         return Err(ApiError::BadRequest(
             "cannot reference request-scoped access grants; promote to catalog first".into(),
         ));
@@ -736,6 +780,7 @@ async fn reject_if_request_scoped_grant(pool: &PgPool, id: Uuid) -> ApiResult<()
 
 async fn resolve_scope_id(
     pool: &PgPool,
+    requester: Uuid,
     _changes: &PermissionRequestChanges,
     entity_ref: &EntityRef,
     proposed: &HashMap<String, Uuid>,
@@ -746,7 +791,7 @@ async fn resolve_scope_id(
             .copied()
             .ok_or_else(|| ApiError::BadRequest(format!("unknown proposed scope key: {key}"))),
         EntityRef::Id { id } => {
-            reject_if_request_scoped_scope(pool, *id).await?;
+            reject_if_foreign_request_scoped_scope(pool, *id, requester).await?;
             Ok(*id)
         }
     }
@@ -754,6 +799,7 @@ async fn resolve_scope_id(
 
 async fn resolve_profile_id(
     pool: &PgPool,
+    requester: Uuid,
     _changes: &PermissionRequestChanges,
     entity_ref: &EntityRef,
     proposed: &HashMap<String, Uuid>,
@@ -764,7 +810,7 @@ async fn resolve_profile_id(
             .copied()
             .ok_or_else(|| ApiError::BadRequest(format!("unknown proposed profile key: {key}"))),
         EntityRef::Id { id } => {
-            reject_if_request_scoped_profile(pool, *id).await?;
+            reject_if_foreign_request_scoped_profile(pool, *id, requester).await?;
             Ok(*id)
         }
     }
@@ -772,6 +818,7 @@ async fn resolve_profile_id(
 
 async fn resolve_grant_id(
     pool: &PgPool,
+    requester: Uuid,
     _changes: &PermissionRequestChanges,
     entity_ref: &EntityRef,
     proposed: &HashMap<String, Uuid>,
@@ -782,7 +829,7 @@ async fn resolve_grant_id(
             .copied()
             .ok_or_else(|| ApiError::BadRequest(format!("unknown proposed grant key: {key}"))),
         EntityRef::Id { id } => {
-            reject_if_request_scoped_grant(pool, *id).await?;
+            reject_if_foreign_request_scoped_grant(pool, *id, requester).await?;
             Ok(*id)
         }
     }
@@ -802,6 +849,15 @@ pub fn ai_may_approve_standard_tier1(changes: &PermissionRequestChanges) -> bool
 mod tests {
     use super::*;
     use hecate_protocol::permissions::ElevationPolicy;
+
+    #[test]
+    fn reason_rejects_oversized_payload() {
+        let long = "a".repeat(MAX_REASON_LEN + 1);
+        assert!(validate_reason(&long).is_err());
+        assert!(validate_optional_reason(Some(&long)).is_err());
+        assert!(validate_optional_reason(Some("ok")).unwrap().as_deref() == Some("ok"));
+        assert!(validate_optional_reason(Some("   ")).unwrap().is_none());
+    }
 
     #[test]
     fn elevation_forces_admin_classification_flag() {

@@ -11,7 +11,7 @@ AI identities can request permanent permission changes via `request_permissions`
    - `add_assignments[]` — reference existing grants `{ kind: "id", id: "<uuid>" }` or proposed grants `{ kind: "proposed", key: "..." }`
    - `propose_fleet_scopes[]`, `propose_capability_profiles[]`, `propose_access_grants[]` — when catalog entities do not exist
    - `remove_assignment_ids[]` — optional removals (operator approval required)
-5. Call `request_permissions` with **`reason`** (required, min 8 characters) and `requested_changes`.
+5. Call `request_permissions` with **`reason`** (required, 8–2000 characters; API enforces min 10) and `requested_changes`.
 6. Only one pending standard request per identity — a second submit returns conflict.
 
 ## Payload example (Tier 1 — existing grant)
