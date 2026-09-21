@@ -112,6 +112,10 @@ Stdout: `{ "stdout", "stderr", "exit_code" }`. Prefer this over agent `shell.run
 | `display:x11` / `wayland` / `windows` / `macos` | Active backend |
 
 Helper package is separate from the agent service (`hecate-lampad-desktop`).
+`helper.install` / package postinst on Linux grant `hecate-ipc` membership and
+start the user-session helper when a GUI session is already logged in (same idea
+as the macOS LaunchAgent / Windows logon task). Without a live GUI session the
+package still installs and activates on next graphical login (`gui:none` until then).
 Without the helper, commands fail with `helper_unavailable` / `no_active_gui_session`.
 
 ## OS permissions
