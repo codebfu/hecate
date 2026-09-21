@@ -11,8 +11,8 @@ import { splitActionQueue, splitPermissionRequests } from "./tools/admin_tools.j
 import { formatUntrustedToolResult } from "./tools/untrusted.js";
 
 describe("tool annotations", () => {
-  it("defines fifty-two tools", () => {
-    expect(TOOL_SPECS).toHaveLength(52);
+  it("defines fifty-three tools", () => {
+    expect(TOOL_SPECS).toHaveLength(53);
   });
 
   it("marks read-only tools", () => {
@@ -33,6 +33,7 @@ describe("tool annotations", () => {
       "list_commands",
       "list_fleet_scopes",
       "list_machines",
+      "list_my_permission_requests",
       "list_permission_requests",
       "list_repo_features",
       "list_repo_sources",
