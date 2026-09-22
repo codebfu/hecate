@@ -86,6 +86,7 @@ Atomic `desktop.click` etc. still work without a session.
 - Optional `cwd` is checked against `shell_policy.allowed_cwd` when provided
 - Optional `wait_window_ms`: poll for a related window after launch (timeout still returns `launched: true`)
 - Typed / keyed input (`desktop.type`, `desktop.key`) and launch params are also scanned by content policy: references to shells / LOLBins outside the allowlist are rejected
+- The agent re-validates `app` against the signed task `shell_policy` before IPC; the desktop helper re-validates against its local allowlist (same files as `shell.run`)
 
 ### desktop.window.list / focus / wait
 
