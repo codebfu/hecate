@@ -23,7 +23,7 @@
 - Task-signing private keys at rest must be `enc:v1:` envelopes; plaintext keys are rejected.
 - MCP tool responses that include remote-origin data separate `metadata` from `untrusted_output` (hostname, stdout/stderr, artifact bytes, command lists) with explicit markers.
 - Agent HTTP client and Propylaea upstream client disable automatic redirects (signed agent headers must not follow Location).
-- Desktop helper policy file missing → deny-by-default (empty allowlists), not wildcard. Windows policy must be owned by Administrators/SYSTEM under ProgramData/Program Files.
+- Desktop helper policy: missing `desktop-helper.toml` uses permissive defaults (`*`); the agent still enforces the signed task `shell_policy` before IPC. Untrusted or invalid policy files remain deny-by-default (empty allowlists). Windows policy files must be owned by Administrators/SYSTEM under ProgramData/Program Files.
 - Windows desktop IPC pipe DACL is SYSTEM + Administrators + Creator Owner (no Interactive Users). IPC token files use a protected DACL (no Users:RX inheritance).
 - Install scripts / agent keys / config / Propylaea proxy key / IPC tokens / runtime status use exclusive create (`create_new` + `O_NOFOLLOW` / Windows reparse refusal); key loads refuse symlinks; package updates refuse world-writable `/tmp`; write probes do not follow symlinks.
 - Production refuses placeholder secrets (`change-me`, short values) and all-zero `HECATE_TASK_SIGNING_MASTER_KEY`.
