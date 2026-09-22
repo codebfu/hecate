@@ -23,7 +23,7 @@ services:
     restart: unless-stopped
 
   api:
-    image: ${HECATE_API_IMAGE:-ghcr.io/codebfu/hecate:1.1.2}
+    image: ${HECATE_API_IMAGE:-ghcr.io/codebfu/hecate:1.1.3}
     depends_on:
       postgres:
         condition: service_healthy
@@ -51,7 +51,7 @@ services:
     restart: unless-stopped
 
   mcp:
-    image: ${HECATE_MCP_IMAGE:-ghcr.io/codebfu/hecate-mcp:1.1.2}
+    image: ${HECATE_MCP_IMAGE:-ghcr.io/codebfu/hecate-mcp:1.1.3}
     depends_on:
       - api
     environment:
