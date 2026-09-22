@@ -100,6 +100,19 @@ fn scan_params(
             }
         }
     }
+    if let Some(app) = params.get("app").and_then(|v| v.as_str()) {
+        scan_text(app, rules)?;
+    }
+    if let Some(args) = params.get("args").and_then(|v| v.as_array()) {
+        let joined: Vec<String> = args
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect();
+        detect_decode_pipeline(&joined)?;
+        for arg in &joined {
+            scan_text(arg, rules)?;
+        }
+    }
     if let Some(text) = params.get("text").and_then(|v| v.as_str()) {
         scan_text(text, rules)?;
     }
@@ -122,10 +135,22 @@ fn detect_decode_pipeline(argv: &[String]) -> Result<(), String> {
             || a.ends_with("/python3")
             || a.ends_with("/perl")
             || a.ends_with("/ruby")
+            || a.ends_with("\\cmd.exe")
+            || a.ends_with("/cmd.exe")
+            || a.ends_with("\\powershell.exe")
+            || a.ends_with("/powershell.exe")
+            || a.ends_with("\\pwsh.exe")
+            || a.ends_with("/pwsh.exe")
             || a == "sh"
             || a == "bash"
             || a == "python"
             || a == "python3"
+            || a == "cmd"
+            || a == "cmd.exe"
+            || a == "powershell"
+            || a == "powershell.exe"
+            || a == "pwsh"
+            || a == "pwsh.exe"
     });
     if has_decode && has_interpreter {
         return Err("decode-to-interpreter pipeline is not allowed".into());
@@ -182,26 +207,58 @@ fn scan_text(text: &str, rules: &CapabilityProfileRules) -> Result<(), String> {
 }
 
 fn looks_like_binary_ref(token: &str) -> bool {
-    token.starts_with('/')
+    if token.starts_with('/')
         || (token.len() >= 3
             && token.as_bytes()[0].is_ascii_alphabetic()
             && token.as_bytes()[1] == b':'
             && (token.as_bytes()[2] == b'\\' || token.as_bytes()[2] == b'/'))
-        || matches!(
-            token,
-            "sh" | "bash"
-                | "zsh"
-                | "dash"
-                | "python"
-                | "python3"
-                | "perl"
-                | "ruby"
-                | "node"
-                | "curl"
-                | "wget"
-                | "sudo"
-                | "pkexec"
-        )
+    {
+        return true;
+    }
+    let lower = token.to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "sh" | "bash"
+            | "zsh"
+            | "dash"
+            | "python"
+            | "python3"
+            | "perl"
+            | "ruby"
+            | "node"
+            | "curl"
+            | "wget"
+            | "sudo"
+            | "pkexec"
+            | "powershell"
+            | "powershell.exe"
+            | "pwsh"
+            | "pwsh.exe"
+            | "cmd"
+            | "cmd.exe"
+            | "cscript"
+            | "cscript.exe"
+            | "wscript"
+            | "wscript.exe"
+            | "mshta"
+            | "mshta.exe"
+            | "regsvr32"
+            | "regsvr32.exe"
+            | "rundll32"
+            | "rundll32.exe"
+            | "certutil"
+            | "certutil.exe"
+            | "bitsadmin"
+            | "bitsadmin.exe"
+            | "net"
+            | "net.exe"
+            | "reg"
+            | "reg.exe"
+            | "sc"
+            | "sc.exe"
+            | "schtasks"
+            | "schtasks.exe"
+    )
 }
 
 fn binary_allowed(token: &str, allowed: &[String]) -> bool {
@@ -362,12 +419,56 @@ mod tests {
     }
 
     #[test]
+    fn rejects_windows_lolbins_in_typed_text() {
+        let rules = rules_with_bins(&["id", "whoami", "hostname", "echo"]);
+        assert!(scan_text("powershell -Command Write-Output ok", &rules).is_err());
+        assert!(scan_text("cmd.exe /c echo ok", &rules).is_err());
+        assert!(scan_text("Pwsh -File run.ps1", &rules).is_err());
+        assert!(scan_text("echo hello world", &rules).is_ok());
+    }
+
+    #[test]
+    fn rejects_disallowed_app_in_launch_params() {
+        let rules = rules_with_bins(&["id", "whoami", "hostname", "echo"]);
+        assert!(scan_params(
+            "desktop.app.launch",
+            &serde_json::json!({ "app": "cmd.exe" }),
+            &rules
+        )
+        .is_err());
+        assert!(scan_params(
+            "desktop.app.launch",
+            &serde_json::json!({ "app": "echo", "args": ["hello"] }),
+            &rules
+        )
+        .is_ok());
+    }
+
+    #[test]
     fn rejects_decode_pipeline() {
         assert!(detect_decode_pipeline(&[
             "/usr/bin/base64".into(),
             "-d".into(),
             "|".into(),
             "/bin/sh".into()
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn rejects_windows_decode_pipeline() {
+        assert!(detect_decode_pipeline(&[
+            "base64".into(),
+            "-d".into(),
+            "|".into(),
+            "powershell".into(),
+        ])
+        .is_err());
+        assert!(detect_decode_pipeline(&[
+            "base64".into(),
+            "-d".into(),
+            "|".into(),
+            "cmd.exe".into(),
         ])
         .is_err());
     }

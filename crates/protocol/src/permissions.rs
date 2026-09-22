@@ -55,6 +55,7 @@ pub fn admin_command_allowed(commands: &[String], name: &str) -> bool {
 pub const PATH_SENSITIVE_COMMANDS: &[&str] = &[
     "shell.run",
     "desktop.shell.run",
+    "desktop.app.launch",
     "file.pull",
     "file.push",
     "file.copy",
@@ -312,6 +313,15 @@ mod tests {
         rules.allowed_commands = vec!["shell.run".into()];
         assert!(validate_path_command_cwd_requirement_legacy(&rules).is_err());
         rules.shell_policy.allowed_cwd = vec!["/tmp".into()];
+        assert!(validate_path_command_cwd_requirement_legacy(&rules).is_ok());
+    }
+
+    #[test]
+    fn path_command_cwd_requirement_includes_desktop_app_launch() {
+        let mut rules = AiPermissionRules::default();
+        rules.allowed_commands = vec!["desktop.app.launch".into()];
+        assert!(validate_path_command_cwd_requirement_legacy(&rules).is_err());
+        rules.shell_policy.allowed_cwd = vec!["*".into()];
         assert!(validate_path_command_cwd_requirement_legacy(&rules).is_ok());
     }
 

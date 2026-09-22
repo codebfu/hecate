@@ -82,7 +82,10 @@ Atomic `desktop.click` etc. still work without a session.
 - Linux: executable name/path or `.desktop` id
 - macOS: app name or bundle id
 - Windows: exe path or registered app name
+- `app` must be present in `shell_policy.allowed_binaries` (exact match, same policy as `shell.run` / `desktop.shell.run`; `"*"` allows any)
+- Optional `cwd` is checked against `shell_policy.allowed_cwd` when provided
 - Optional `wait_window_ms`: poll for a related window after launch (timeout still returns `launched: true`)
+- Typed / keyed input (`desktop.type`, `desktop.key`) and launch params are also scanned by content policy: references to shells / LOLBins outside the allowlist are rejected
 
 ### desktop.window.list / focus / wait
 

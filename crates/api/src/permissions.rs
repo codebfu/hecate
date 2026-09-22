@@ -606,7 +606,7 @@ pub fn validate_desktop_params(
                 .map(str::trim)
                 .filter(|v| !v.is_empty())
                 .ok_or_else(|| ApiError::BadRequest("app required".into()))?;
-            let _ = app;
+            let mut argv = vec![app.to_string()];
             if let Some(args) = params.get("args") {
                 let arr = args
                     .as_array()
@@ -615,15 +615,20 @@ pub fn validate_desktop_params(
                     return Err(ApiError::BadRequest("args exceeds max of 64".into()));
                 }
                 for item in arr {
-                    if item.as_str().is_none() {
+                    let Some(arg) = item.as_str() else {
                         return Err(ApiError::BadRequest("args entries must be strings".into()));
-                    }
+                    };
+                    argv.push(arg.to_string());
                 }
             }
+            policy::check_shell_policy(&argv, &rules.shell_policy.allowed_binaries)
+                .map_err(|e| ApiError::BadRequest(e.to_string()))?;
             if let Some(cwd) = params.get("cwd").and_then(|v| v.as_str()) {
                 if cwd.trim().is_empty() {
                     return Err(ApiError::BadRequest("cwd must not be empty".into()));
                 }
+                policy::check_cwd_policy(cwd, &rules.shell_policy.allowed_cwd)
+                    .map_err(|e| ApiError::BadRequest(e.to_string()))?;
             }
             if let Some(wait_ms) = optional_u64(params, "wait_window_ms")? {
                 if wait_ms > 120_000 {
@@ -1131,7 +1136,9 @@ mod tests {
 
     #[test]
     fn validates_desktop_app_launch() {
-        let rules = default_rules();
+        let mut rules = default_rules();
+        rules.shell_policy.allowed_binaries = vec!["mousepad".into()];
+        rules.shell_policy.allowed_cwd = vec!["*".into()];
         assert!(validate_desktop_params("desktop.app.launch", &serde_json::json!({}), &rules).is_err());
         assert!(validate_desktop_params(
             "desktop.app.launch",
@@ -1139,6 +1146,25 @@ mod tests {
             &rules
         )
         .is_ok());
+        assert!(validate_desktop_params(
+            "desktop.app.launch",
+            &serde_json::json!({ "app": "cmd.exe" }),
+            &rules
+        )
+        .is_err());
+        assert!(validate_desktop_params(
+            "desktop.app.launch",
+            &serde_json::json!({ "app": "mousepad", "cwd": "/tmp" }),
+            &rules
+        )
+        .is_ok());
+        rules.shell_policy.allowed_cwd = vec!["/home".into()];
+        assert!(validate_desktop_params(
+            "desktop.app.launch",
+            &serde_json::json!({ "app": "mousepad", "cwd": "/tmp" }),
+            &rules
+        )
+        .is_err());
     }
 
     #[test]

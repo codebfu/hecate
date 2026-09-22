@@ -13,6 +13,8 @@
 
 - AI authz tag source toggles (admin settings).
 - `desktop.shell.run` uses the same shell/elevation/cwd/env policy as `shell.run`.
+- `desktop.app.launch` applies `shell_policy.allowed_binaries` to `app` (+ `args`) and `allowed_cwd` when `cwd` is set. Content policy also scans `app`/`args`/`text` and blocks known Unix shells and Windows LOLBins outside the allowlist.
+- `elevation_policy` only applies to `shell.run` / `desktop.shell.run` with `elevated: true`. Apps started via `desktop.app.launch` inherit the interactive GUI helper session token; they are not gated by `elevation_policy.enabled`.
 - Desktop/Proxmox IPC requires a shared `ipc.token` on every request (OsRng, constant-time compare). Linux: token `0640` + socket `0660` under `/run/hecate-lampad` (`RuntimeDirectoryMode=0750`, group `hecate-ipc`); Windows: named pipe DACL `SY/BA/CO` and `%ProgramData%\hecate-lampad\ipc.token`. Helpers also re-validate shell/cwd/env policy locally.
 - Path traversal rejection and deny-by-default empty `allowed_cwd`.
 - Env allowlist enforcement (dangerous vars blocked even with `*`).
