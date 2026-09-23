@@ -1,7 +1,12 @@
 // Copyright (C) 2026 Gaultier HUBERT
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-import type { CapabilityProfile, ShellPolicy, ElevationPolicy } from "../../api/client.js";
+import type {
+  CapabilityProfile,
+  ShellPolicy,
+  ElevationPolicy,
+  DesktopPolicy,
+} from "../../api/client.js";
 import type { CommandOption } from "./commandCatalog.js";
 
 export const ALLOWLIST_WILDCARD = "*";
@@ -12,6 +17,7 @@ export const DEFAULT_CAPABILITY_PROFILE: Pick<
   | "allowed_admin_commands"
   | "shell_policy"
   | "elevation_policy"
+  | "desktop_policy"
   | "max_output_bytes"
   | "max_file_bytes"
   | "timeout_secs"
@@ -21,6 +27,7 @@ export const DEFAULT_CAPABILITY_PROFILE: Pick<
   allowed_admin_commands: [],
   shell_policy: { allowed_binaries: [], allowed_cwd: [], allowed_env: [] },
   elevation_policy: { enabled: false, allowed_binaries: [] },
+  desktop_policy: { allow_os_launchers: false },
   max_output_bytes: 1_048_576,
   max_file_bytes: 52_428_800,
   timeout_secs: 30,
@@ -128,6 +135,7 @@ export function capabilityToFormState(
     | "allowed_admin_commands"
     | "shell_policy"
     | "elevation_policy"
+    | "desktop_policy"
     | "max_output_bytes"
     | "max_file_bytes"
     | "timeout_secs"
@@ -156,6 +164,7 @@ export function capabilityToFormState(
     elevationBinariesText: formatLineList(
       profile.elevation_policy.allowed_binaries.filter((binary) => binary !== ALLOWLIST_WILDCARD),
     ),
+    allowOsLaunchers: profile.desktop_policy?.allow_os_launchers ?? false,
     maxOutputBytes: profile.max_output_bytes,
     maxFileBytes: profile.max_file_bytes,
     timeoutSecs: profile.timeout_secs,
@@ -171,6 +180,7 @@ export function formStateToCapability(
   | "allowed_admin_commands"
   | "shell_policy"
   | "elevation_policy"
+  | "desktop_policy"
   | "max_output_bytes"
   | "max_file_bytes"
   | "timeout_secs"
@@ -189,6 +199,9 @@ export function formStateToCapability(
       ? [ALLOWLIST_WILDCARD]
       : parseLineList(state.elevationBinariesText),
   };
+  const desktopPolicy: DesktopPolicy = {
+    allow_os_launchers: state.allowOsLaunchers,
+  };
 
   return {
     allowed_commands: buildAllowedCommands(
@@ -203,6 +216,7 @@ export function formStateToCapability(
     ),
     shell_policy: shellPolicy,
     elevation_policy: elevationPolicy,
+    desktop_policy: desktopPolicy,
     max_output_bytes: state.maxOutputBytes,
     max_file_bytes: state.maxFileBytes,
     timeout_secs: state.timeoutSecs,

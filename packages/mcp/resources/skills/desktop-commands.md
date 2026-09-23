@@ -86,7 +86,12 @@ Atomic `desktop.click` etc. still work without a session.
 - Optional `cwd` is checked against `shell_policy.allowed_cwd` when provided
 - Optional `wait_window_ms`: poll for a related window after launch (timeout still returns `launched: true`)
 - Typed / keyed input (`desktop.type`, `desktop.key`) and launch params are also scanned by content policy: references to shells / LOLBins outside the allowlist are rejected
+- Nested `desktop.session.input` events (`text` / `key`) are scanned the same way
+- A sliding keystroke buffer (per identity + machine, 256 chars, 5 min idle TTL; cleared on `desktop.window.focus`) also scans fragmented typing across requests
+- OS launcher hotkeys (`Win+R`, `Alt+F2`, `Ctrl+Alt+T`, `Ctrl+Shift+Esc`, `Win+letter`, …) are **blocked by default**; set `desktop_policy.allow_os_launchers: true` only after explicit admin review
+- Permission requests that include desktop injection commands (`desktop.type` / `key` / `click` / `app.launch` / `session.input` / `session.open`) are classified **Admin** for human review
 - The agent re-validates `app` against the signed task `shell_policy` before IPC; the desktop helper re-validates against its local allowlist (same files as `shell.run`)
+- GUI apps inherit the **interactive session user**, not agent LocalSystem/root. Keep that session account standard (non-Administrator / no broad NOPASSWD). Route real elevation through `shell.run` / `desktop.shell.run` with `elevated:true` + `elevation_policy`
 
 ### desktop.window.list / focus / wait
 
@@ -127,5 +132,12 @@ Without the helper, commands fail with `helper_unavailable` / `no_active_gui_ses
 - Linux: X11 primary; Wayland-only sessions return `display_unsupported` for window/app APIs.
 - macOS: Accessibility + Screen Recording TCC for the helper (window focus may need Accessibility).
 - Windows: user-session helper (not LocalSystem) for input/capture/window control.
+
+### Session privilege checklist (ops)
+
+- Use a **standard** interactive account for the GUI session the desktop helper joins — not the built-in Administrator and not a user with broad passwordless sudo.
+- Keep UAC / Admin Approval Mode enabled on Windows session accounts used for automation.
+- Grant elevated work only via `elevation_policy` + `elevated:true` on `shell.run` / `desktop.shell.run`, never by making the GUI session itself privileged.
+- Treat `desktop_policy.allow_os_launchers` as an intentional admin override, not a default for jail-style grants.
 
 Stable error codes include `not_found`, `timeout`, `permission_denied`, `display_unsupported`.

@@ -11,7 +11,9 @@ use hecate_protocol::authz::{
     FleetScopeSummary, GrantAssignment, ResolvedGrantAssignment, TagMatchMode,
 };
 use hecate_protocol::machine_tags;
-use hecate_protocol::permissions::{validate_machine_ids, ShellPolicy, ElevationPolicy};
+use hecate_protocol::permissions::{
+    validate_machine_ids, DesktopPolicy, ElevationPolicy, ShellPolicy,
+};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -56,6 +58,8 @@ pub struct CapabilityProfileInput {
     #[serde(default)]
     pub elevation_policy: ElevationPolicy,
     #[serde(default)]
+    pub desktop_policy: DesktopPolicy,
+    #[serde(default)]
     pub max_output_bytes: Option<u32>,
     #[serde(default)]
     pub max_file_bytes: Option<u32>,
@@ -73,6 +77,7 @@ pub struct CapabilityProfilePatch {
     pub allowed_admin_commands: Option<Vec<String>>,
     pub shell_policy: Option<ShellPolicy>,
     pub elevation_policy: Option<ElevationPolicy>,
+    pub desktop_policy: Option<DesktopPolicy>,
     pub max_output_bytes: Option<u32>,
     pub max_file_bytes: Option<u32>,
     pub timeout_secs: Option<u32>,
@@ -148,6 +153,7 @@ struct CapabilityProfileRow {
     allowed_admin_commands: Vec<String>,
     shell_policy: serde_json::Value,
     elevation_policy: serde_json::Value,
+    desktop_policy: serde_json::Value,
     max_output_bytes: i32,
     max_file_bytes: i32,
     timeout_secs: i32,
@@ -210,6 +216,8 @@ fn row_to_capability_profile(row: CapabilityProfileRow) -> ApiResult<CapabilityP
         .map_err(|e| ApiError::Internal(anyhow::anyhow!("invalid shell_policy: {e}")))?;
     let elevation_policy: ElevationPolicy = serde_json::from_value(row.elevation_policy)
         .map_err(|e| ApiError::Internal(anyhow::anyhow!("invalid elevation_policy: {e}")))?;
+    let desktop_policy: DesktopPolicy = serde_json::from_value(row.desktop_policy)
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!("invalid desktop_policy: {e}")))?;
     Ok(CapabilityProfile {
         id: row.id,
         name: row.name,
@@ -221,6 +229,7 @@ fn row_to_capability_profile(row: CapabilityProfileRow) -> ApiResult<CapabilityP
         allowed_admin_commands: row.allowed_admin_commands,
         shell_policy,
         elevation_policy,
+        desktop_policy,
         max_output_bytes: row.max_output_bytes as u32,
         max_file_bytes: row.max_file_bytes as u32,
         timeout_secs: row.timeout_secs as u32,
@@ -309,7 +318,7 @@ async fn load_capability_profile_row(pool: &PgPool, id: Uuid) -> ApiResult<Capab
     sqlx::query_as(
         "SELECT id, name, description, provenance::text, request_scoped, owner_ai_identity_id,
                 allowed_commands, allowed_admin_commands, shell_policy, elevation_policy,
-                max_output_bytes, max_file_bytes, timeout_secs, max_concurrent,
+                desktop_policy, max_output_bytes, max_file_bytes, timeout_secs, max_concurrent,
                 created_at, updated_at
          FROM capability_profiles WHERE id = $1",
     )
@@ -423,6 +432,7 @@ fn validate_capability_profile_input(input: &CapabilityProfileInput) -> ApiResul
         allowed_admin_commands: input.allowed_admin_commands.clone(),
         shell_policy: input.shell_policy.clone(),
         elevation_policy: input.elevation_policy.clone(),
+        desktop_policy: input.desktop_policy.clone(),
         max_output_bytes: input.max_output_bytes.unwrap_or(hecate_protocol::permissions::DEFAULT_MAX_OUTPUT_BYTES),
         max_file_bytes: input.max_file_bytes.unwrap_or(hecate_protocol::permissions::DEFAULT_MAX_FILE_BYTES),
         timeout_secs: input.timeout_secs.unwrap_or(hecate_protocol::permissions::DEFAULT_TIMEOUT_SECS),
@@ -619,7 +629,7 @@ pub async fn list_capability_profiles(pool: &PgPool) -> ApiResult<Vec<Capability
     let rows: Vec<CapabilityProfileRow> = sqlx::query_as(
         "SELECT id, name, description, provenance::text, request_scoped, owner_ai_identity_id,
                 allowed_commands, allowed_admin_commands, shell_policy, elevation_policy,
-                max_output_bytes, max_file_bytes, timeout_secs, max_concurrent,
+                desktop_policy, max_output_bytes, max_file_bytes, timeout_secs, max_concurrent,
                 created_at, updated_at
          FROM capability_profiles
          ORDER BY CASE WHEN provenance = 'system' THEN 0 ELSE 1 END, name",
@@ -647,15 +657,17 @@ pub async fn create_capability_profile(
         .map_err(|e| ApiError::BadRequest(e.to_string()))?;
     let elevation_policy = serde_json::to_value(&input.elevation_policy)
         .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    let desktop_policy = serde_json::to_value(&input.desktop_policy)
+        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
     sqlx::query(
         "INSERT INTO capability_profiles (
             id, name, description, provenance, request_scoped,
             allowed_commands, allowed_admin_commands, shell_policy, elevation_policy,
-            max_output_bytes, max_file_bytes, timeout_secs, max_concurrent
+            desktop_policy, max_output_bytes, max_file_bytes, timeout_secs, max_concurrent
          ) VALUES (
             $1, $2, $3, 'operator', false,
             $4, $5, $6, $7,
-            COALESCE($8, 1048576), COALESCE($9, 52428800), COALESCE($10, 30), COALESCE($11, 4)
+            $8, COALESCE($9, 1048576), COALESCE($10, 52428800), COALESCE($11, 30), COALESCE($12, 4)
          )",
     )
     .bind(id)
@@ -665,6 +677,7 @@ pub async fn create_capability_profile(
     .bind(&input.allowed_admin_commands)
     .bind(shell_policy)
     .bind(elevation_policy)
+    .bind(desktop_policy)
     .bind(input.max_output_bytes.map(|v| v as i32))
     .bind(input.max_file_bytes.map(|v| v as i32))
     .bind(input.timeout_secs.map(|v| v as i32))
@@ -691,6 +704,7 @@ pub async fn update_capability_profile(
             .unwrap_or(current.allowed_admin_commands),
         shell_policy: patch.shell_policy.clone().unwrap_or(current.shell_policy),
         elevation_policy: patch.elevation_policy.clone().unwrap_or(current.elevation_policy),
+        desktop_policy: patch.desktop_policy.clone().unwrap_or(current.desktop_policy),
         max_output_bytes: patch.max_output_bytes.unwrap_or(current.max_output_bytes),
         max_file_bytes: patch.max_file_bytes.unwrap_or(current.max_file_bytes),
         timeout_secs: patch.timeout_secs.unwrap_or(current.timeout_secs),
@@ -705,13 +719,15 @@ pub async fn update_capability_profile(
         .map_err(|e| ApiError::BadRequest(e.to_string()))?;
     let elevation_policy = serde_json::to_value(&next.elevation_policy)
         .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    let desktop_policy = serde_json::to_value(&next.desktop_policy)
+        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
     sqlx::query(
         "UPDATE capability_profiles SET
             name = $1, description = $2, allowed_commands = $3, allowed_admin_commands = $4,
-            shell_policy = $5, elevation_policy = $6,
-            max_output_bytes = $7, max_file_bytes = $8, timeout_secs = $9, max_concurrent = $10,
+            shell_policy = $5, elevation_policy = $6, desktop_policy = $7,
+            max_output_bytes = $8, max_file_bytes = $9, timeout_secs = $10, max_concurrent = $11,
             updated_at = now()
-         WHERE id = $11",
+         WHERE id = $12",
     )
     .bind(&next.name)
     .bind(&next.description)
@@ -719,6 +735,7 @@ pub async fn update_capability_profile(
     .bind(&next.allowed_admin_commands)
     .bind(shell_policy)
     .bind(elevation_policy)
+    .bind(desktop_policy)
     .bind(next.max_output_bytes as i32)
     .bind(next.max_file_bytes as i32)
     .bind(next.timeout_secs as i32)
@@ -1142,6 +1159,7 @@ mod tests {
             allowed_admin_commands: vec![],
             shell_policy,
             elevation_policy: serde_json::json!({}),
+            desktop_policy: serde_json::json!({}),
             max_output_bytes: 1_048_576,
             max_file_bytes: 52_428_800,
             timeout_secs: 30,

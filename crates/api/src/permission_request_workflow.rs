@@ -155,6 +155,10 @@ fn classify_profile_flags(
     if profile.elevation_policy.enabled {
         *force_admin = true;
     }
+    if hecate_protocol::permissions::profile_grants_admin_review_desktop(&profile.allowed_commands)
+    {
+        *force_admin = true;
+    }
 }
 
 async fn scope_ref_is_fleet_wildcard(
@@ -388,6 +392,7 @@ async fn resolve_assignment_preview_parts(
                     allowed_admin_commands: detail.capability_profile.allowed_admin_commands.clone(),
                     shell_policy: detail.capability_profile.shell_policy.clone(),
                     elevation_policy: detail.capability_profile.elevation_policy.clone(),
+                    desktop_policy: detail.capability_profile.desktop_policy.clone(),
                     max_output_bytes: Some(detail.capability_profile.max_output_bytes),
                     max_file_bytes: Some(detail.capability_profile.max_file_bytes),
                     timeout_secs: Some(detail.capability_profile.timeout_secs),
@@ -545,15 +550,17 @@ pub async fn apply_approved_changes(
             .map_err(|e| ApiError::BadRequest(e.to_string()))?;
         let elevation_policy = serde_json::to_value(&profile.elevation_policy)
             .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+        let desktop_policy = serde_json::to_value(&profile.desktop_policy)
+            .map_err(|e| ApiError::BadRequest(e.to_string()))?;
         sqlx::query(
             "INSERT INTO capability_profiles (
                 id, name, description, provenance, request_scoped, owner_ai_identity_id,
                 allowed_commands, allowed_admin_commands, shell_policy, elevation_policy,
-                max_output_bytes, max_file_bytes, timeout_secs, max_concurrent
+                desktop_policy, max_output_bytes, max_file_bytes, timeout_secs, max_concurrent
              ) VALUES (
                 $1, $2, $3, 'permission_request', true, $4,
                 $5, $6, $7, $8,
-                COALESCE($9, 1048576), COALESCE($10, 52428800), COALESCE($11, 30), COALESCE($12, 4)
+                $9, COALESCE($10, 1048576), COALESCE($11, 52428800), COALESCE($12, 30), COALESCE($13, 4)
              )",
         )
         .bind(id)
@@ -564,6 +571,7 @@ pub async fn apply_approved_changes(
         .bind(&profile.allowed_admin_commands)
         .bind(shell_policy)
         .bind(elevation_policy)
+        .bind(desktop_policy)
         .bind(profile.max_output_bytes.map(|v| v as i32))
         .bind(profile.max_file_bytes.map(|v| v as i32))
         .bind(profile.timeout_secs.map(|v| v as i32))
@@ -657,6 +665,7 @@ fn validate_proposed_profile(profile: &ProposedCapabilityProfile) -> ApiResult<(
         allowed_admin_commands: profile.allowed_admin_commands.clone(),
         shell_policy: profile.shell_policy.clone(),
         elevation_policy: profile.elevation_policy.clone(),
+        desktop_policy: profile.desktop_policy.clone(),
         max_output_bytes: profile.max_output_bytes.unwrap_or(1_048_576),
         max_file_bytes: profile.max_file_bytes.unwrap_or(52_428_800),
         timeout_secs: profile.timeout_secs.unwrap_or(30),
@@ -692,6 +701,7 @@ async fn resolve_profile_for_ref(
                 allowed_admin_commands: profile.allowed_admin_commands,
                 shell_policy: profile.shell_policy,
                 elevation_policy: profile.elevation_policy,
+                desktop_policy: profile.desktop_policy,
                 max_output_bytes: Some(profile.max_output_bytes),
                 max_file_bytes: Some(profile.max_file_bytes),
                 timeout_secs: Some(profile.timeout_secs),
@@ -725,6 +735,7 @@ async fn resolve_profile_for_assignment(
                 allowed_admin_commands: detail.capability_profile.allowed_admin_commands,
                 shell_policy: detail.capability_profile.shell_policy,
                 elevation_policy: detail.capability_profile.elevation_policy,
+                desktop_policy: detail.capability_profile.desktop_policy,
                 max_output_bytes: Some(detail.capability_profile.max_output_bytes),
                 max_file_bytes: Some(detail.capability_profile.max_file_bytes),
                 timeout_secs: Some(detail.capability_profile.timeout_secs),
@@ -875,6 +886,7 @@ mod tests {
                 enabled: true,
                 allowed_binaries: vec!["*".into()],
             },
+            desktop_policy: Default::default(),
             max_output_bytes: None,
             max_file_bytes: None,
             timeout_secs: None,
@@ -889,6 +901,70 @@ mod tests {
         assert!(!has_admin_cmds);
         assert!(has_standard_cmds);
         assert!(force_admin);
+    }
+
+    #[test]
+    fn desktop_injection_forces_admin_classification_flag() {
+        let mut has_admin_cmds = false;
+        let mut has_standard_cmds = false;
+        let mut force_admin = false;
+        let profile = ProposedCapabilityProfile {
+            key: "cp-desktop".into(),
+            name: "computer-use".into(),
+            description: String::new(),
+            allowed_commands: vec![
+                "shell.run".into(),
+                "desktop.key".into(),
+                "desktop.type".into(),
+            ],
+            allowed_admin_commands: vec![],
+            shell_policy: Default::default(),
+            elevation_policy: Default::default(),
+            desktop_policy: Default::default(),
+            max_output_bytes: None,
+            max_file_bytes: None,
+            timeout_secs: None,
+            max_concurrent: None,
+        };
+        classify_profile_flags(
+            &profile,
+            &mut has_admin_cmds,
+            &mut has_standard_cmds,
+            &mut force_admin,
+        );
+        assert!(!has_admin_cmds);
+        assert!(has_standard_cmds);
+        assert!(force_admin);
+    }
+
+    #[test]
+    fn system_info_alone_does_not_force_admin() {
+        let mut has_admin_cmds = false;
+        let mut has_standard_cmds = false;
+        let mut force_admin = false;
+        let profile = ProposedCapabilityProfile {
+            key: "cp-info".into(),
+            name: "info".into(),
+            description: String::new(),
+            allowed_commands: vec!["system.info".into()],
+            allowed_admin_commands: vec![],
+            shell_policy: Default::default(),
+            elevation_policy: Default::default(),
+            desktop_policy: Default::default(),
+            max_output_bytes: None,
+            max_file_bytes: None,
+            timeout_secs: None,
+            max_concurrent: None,
+        };
+        classify_profile_flags(
+            &profile,
+            &mut has_admin_cmds,
+            &mut has_standard_cmds,
+            &mut force_admin,
+        );
+        assert!(!has_admin_cmds);
+        assert!(has_standard_cmds);
+        assert!(!force_admin);
     }
 
     #[test]

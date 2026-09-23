@@ -347,6 +347,24 @@ export function CapabilityProfileEditor({
         ) : null}
 
         <section className="permissions-section">
+          <h4>Desktop input</h4>
+          <label>
+            <input
+              type="checkbox"
+              checked={formState.allowOsLaunchers}
+              onChange={(e) =>
+                setFormState((current) => ({ ...current, allowOsLaunchers: e.target.checked }))
+              }
+              disabled={controlsDisabled}
+            />{" "}
+            Allow OS launcher hotkeys (Win+R, Alt+F2, Ctrl+Alt+T, …)
+          </label>
+          <p className="muted">
+            Off by default. Enable only after admin review of computer-use grants.
+          </p>
+        </section>
+
+        <section className="permissions-section">
           <h4>Execution limits</h4>
           <div className="permissions-limits-grid">
             <label>

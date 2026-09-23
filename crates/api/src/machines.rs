@@ -65,21 +65,24 @@ pub fn agent_runtime_for_os(os: &str) -> Value {
             "runs_as_service_user": true,
             "elevation_method": "sudo",
             "elevated_flag_required": true,
-            "note": "Use shell.run with elevated=true for root commands; never pass sudo in argv."
+            "note": "Use shell.run / desktop.shell.run with elevated=true for root; never pass sudo in argv. GUI apps launched via desktop.* inherit the interactive session user (keep that account non-root / without broad NOPASSWD sudo).",
+            "desktop_session_note": "desktop.app.launch / typed input inherit the GUI session token; elevation_policy does not apply to them."
         }),
         "macos" => json!({
             "platform": "macos",
             "runs_as_service_user": true,
             "elevation_method": "sudo",
             "elevated_flag_required": true,
-            "note": "Use shell.run with elevated=true for root commands; never pass sudo in argv."
+            "note": "Use shell.run / desktop.shell.run with elevated=true for root; never pass sudo in argv. GUI apps inherit the interactive session user.",
+            "desktop_session_note": "desktop.app.launch / typed input inherit the GUI session token; elevation_policy does not apply to them."
         }),
         "windows" => json!({
             "platform": "windows",
             "runs_as_service_user": true,
             "elevation_method": "windows_admin",
             "elevated_flag_required": true,
-            "note": "Use shell.run with elevated=true; requires the agent service to run as Administrator or LocalSystem."
+            "note": "Use shell.run / desktop.shell.run with elevated=true; requires the agent service to run as Administrator or LocalSystem. Keep the interactive GUI session on a standard (non-Administrator) account with UAC enabled.",
+            "desktop_session_note": "desktop.app.launch / typed input inherit the GUI session token, not LocalSystem; elevation_policy does not apply to them."
         }),
         other => json!({
             "platform": other,

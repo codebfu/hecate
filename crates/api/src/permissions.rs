@@ -385,6 +385,95 @@ fn validate_region(params: &serde_json::Value) -> ApiResult<()> {
     Ok(())
 }
 
+fn normalize_modifier(raw: &str) -> String {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "meta" | "super" | "win" | "cmd" | "command" | "windows" => "meta".into(),
+        "ctrl" | "control" => "ctrl".into(),
+        "alt" | "option" => "alt".into(),
+        "shift" => "shift".into(),
+        other => other.to_string(),
+    }
+}
+
+fn collect_modifiers(params: &serde_json::Value) -> Vec<String> {
+    params
+        .get("modifiers")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .map(normalize_modifier)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn has_mod(mods: &[String], name: &str) -> bool {
+    mods.iter().any(|m| m == name)
+}
+
+/// Deny known OS launcher / Run-dialog hotkeys unless `desktop_policy.allow_os_launchers`.
+pub fn reject_os_launcher_hotkey(key: &str, modifiers: &[String]) -> ApiResult<()> {
+    let key_norm = key.trim().to_ascii_lowercase();
+    let mods: Vec<String> = modifiers.iter().map(|m| normalize_modifier(m)).collect();
+
+    let meta_only = has_mod(&mods, "meta")
+        && !has_mod(&mods, "ctrl")
+        && !has_mod(&mods, "alt")
+        && !has_mod(&mods, "shift");
+    let alt_only = has_mod(&mods, "alt")
+        && !has_mod(&mods, "meta")
+        && !has_mod(&mods, "ctrl")
+        && !has_mod(&mods, "shift");
+    let ctrl_alt = has_mod(&mods, "ctrl")
+        && has_mod(&mods, "alt")
+        && !has_mod(&mods, "meta")
+        && !has_mod(&mods, "shift");
+    let ctrl_shift = has_mod(&mods, "ctrl")
+        && has_mod(&mods, "shift")
+        && !has_mod(&mods, "meta")
+        && !has_mod(&mods, "alt");
+
+    let blocked = if meta_only {
+        // Win/Meta alone, Win+letter (Run, Explorer, …), Win+Space (Spotlight-like)
+        key_norm.is_empty()
+            || key_norm == "meta"
+            || key_norm == "super"
+            || key_norm == "win"
+            || key_norm == "cmd"
+            || key_norm == "command"
+            || key_norm == "space"
+            || key_norm.chars().count() == 1
+    } else if alt_only && (key_norm == "f2" || key_norm == "f3") {
+        true
+    } else if ctrl_alt && key_norm == "t" {
+        true
+    } else if ctrl_shift && (key_norm == "escape" || key_norm == "esc") {
+        true
+    } else {
+        false
+    };
+
+    if blocked {
+        return Err(ApiError::BadRequest(
+            "OS launcher hotkey blocked; set desktop_policy.allow_os_launchers=true after admin review"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+fn enforce_os_launcher_policy(
+    rules: &CapabilityProfileRules,
+    key: &str,
+    modifiers: &[String],
+) -> ApiResult<()> {
+    if rules.desktop_policy.allow_os_launchers {
+        return Ok(());
+    }
+    reject_os_launcher_hotkey(key, modifiers)
+}
+
 pub fn validate_desktop_params(
     command_name: &str,
     params: &serde_json::Value,
@@ -477,7 +566,6 @@ pub fn validate_desktop_params(
                 .map(str::trim)
                 .filter(|v| !v.is_empty())
                 .ok_or_else(|| ApiError::BadRequest("key required".into()))?;
-            let _ = key;
             if let Some(action) = params.get("action").and_then(|v| v.as_str()) {
                 if !matches!(action, "press" | "release" | "tap") {
                     return Err(ApiError::BadRequest(
@@ -485,18 +573,21 @@ pub fn validate_desktop_params(
                     ));
                 }
             }
-            if let Some(modifiers) = params.get("modifiers") {
-                let arr = modifiers
+            let mut modifiers = Vec::new();
+            if let Some(mods) = params.get("modifiers") {
+                let arr = mods
                     .as_array()
                     .ok_or_else(|| ApiError::BadRequest("modifiers must be an array".into()))?;
                 for item in arr {
-                    if item.as_str().is_none() {
+                    let Some(s) = item.as_str() else {
                         return Err(ApiError::BadRequest(
                             "modifiers entries must be strings".into(),
                         ));
-                    }
+                    };
+                    modifiers.push(s.to_string());
                 }
             }
+            enforce_os_launcher_policy(rules, key, &modifiers)?;
             Ok(())
         }
         "desktop.clipboard.get" => {
@@ -595,6 +686,16 @@ pub fn validate_desktop_params(
                     return Err(ApiError::BadRequest(format!(
                         "unsupported event.action: {action}"
                     )));
+                }
+                if action == "key" {
+                    let key = event
+                        .get("key")
+                        .and_then(|v| v.as_str())
+                        .map(str::trim)
+                        .filter(|v| !v.is_empty())
+                        .ok_or_else(|| ApiError::BadRequest("event.key required".into()))?;
+                    let mods = collect_modifiers(event);
+                    enforce_os_launcher_policy(rules, key, &mods)?;
                 }
             }
             Ok(())
@@ -871,6 +972,7 @@ mod tests {
             allowed_admin_commands: vec![],
             shell_policy: ShellPolicy::default(),
             elevation_policy: ElevationPolicy::default(),
+            desktop_policy: Default::default(),
             max_output_bytes: hecate_protocol::permissions::DEFAULT_MAX_OUTPUT_BYTES,
             max_file_bytes: hecate_protocol::permissions::DEFAULT_MAX_FILE_BYTES,
             timeout_secs: hecate_protocol::permissions::DEFAULT_TIMEOUT_SECS,
@@ -1217,5 +1319,61 @@ mod tests {
             &rules
         )
         .is_err());
+    }
+
+    #[test]
+    fn blocks_os_launcher_hotkeys_by_default() {
+        let rules = default_rules();
+        assert!(validate_desktop_params(
+            "desktop.key",
+            &serde_json::json!({ "key": "r", "modifiers": ["meta"] }),
+            &rules
+        )
+        .is_err());
+        assert!(validate_desktop_params(
+            "desktop.key",
+            &serde_json::json!({ "key": "F2", "modifiers": ["alt"] }),
+            &rules
+        )
+        .is_err());
+        assert!(validate_desktop_params(
+            "desktop.key",
+            &serde_json::json!({ "key": "t", "modifiers": ["ctrl", "alt"] }),
+            &rules
+        )
+        .is_err());
+        assert!(validate_desktop_params(
+            "desktop.key",
+            &serde_json::json!({ "key": "a", "modifiers": ["ctrl"] }),
+            &rules
+        )
+        .is_ok());
+        assert!(validate_desktop_params(
+            "desktop.key",
+            &serde_json::json!({ "key": "Return" }),
+            &rules
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn allow_os_launchers_opt_in_permits_hotkeys() {
+        let mut rules = default_rules();
+        rules.desktop_policy.allow_os_launchers = true;
+        assert!(validate_desktop_params(
+            "desktop.key",
+            &serde_json::json!({ "key": "r", "modifiers": ["meta"] }),
+            &rules
+        )
+        .is_ok());
+        assert!(validate_desktop_params(
+            "desktop.session.input",
+            &serde_json::json!({
+                "session_id": "00000000-0000-4000-8000-000000000001",
+                "events": [{ "action": "key", "key": "r", "modifiers": ["win"] }]
+            }),
+            &rules
+        )
+        .is_ok());
     }
 }

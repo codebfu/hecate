@@ -13,9 +13,14 @@
 
 - AI authz tag source toggles (admin settings).
 - `desktop.shell.run` uses the same shell/elevation/cwd/env policy as `shell.run`.
-- `desktop.app.launch` applies `shell_policy.allowed_binaries` to `app` (+ `args`) and `allowed_cwd` when `cwd` is set. Content policy also scans `app`/`args`/`text` and blocks known Unix shells and Windows LOLBins outside the allowlist.
+- `desktop.app.launch` applies `shell_policy.allowed_binaries` to `app` (+ `args`) and `allowed_cwd` when `cwd` is set. Content policy also scans `app`/`args`/`text`/`key` and nested `desktop.session.input` events, and blocks known Unix shells and Windows LOLBins outside the allowlist.
+- Sliding keystroke buffer (per AI identity + machine) scans fragmented `desktop.type` / `desktop.key` / session typing; buffer clears on `desktop.window.focus` or after 5 minutes idle.
+- OS launcher hotkeys are denied by default (`desktop_policy.allow_os_launchers`, default false).
+- Permission requests that propose desktop injection commands are force-classified Admin for human review.
 - Agent and desktop helper re-validate `desktop.app.launch` the same way as `desktop.shell.run` / `shell.run` (signed task policy on the agent; local helper TOML allowlists on the helper).
 - `elevation_policy` only applies to `shell.run` / `desktop.shell.run` with `elevated: true`. Apps started via `desktop.app.launch` inherit the interactive GUI helper session token; they are not gated by `elevation_policy.enabled`.
+- `file.push` modes are masked to `0o777` (setuid/setgid/sticky bits stripped).
+- Elevation wrapper deny-list includes `su` / `doas` / `runuser` / `sudoedit` / `machinectl` / `systemd-run` in addition to `sudo` / `pkexec` / `runas`.
 - Desktop/Proxmox IPC requires a shared `ipc.token` on every request (OsRng, constant-time compare). Linux: token `0640` + socket `0660` under `/run/hecate-lampad` (`RuntimeDirectoryMode=0750`, group `hecate-ipc`); Windows: named pipe DACL `SY/BA/CO` and `%ProgramData%\hecate-lampad\ipc.token`. Helpers also re-validate shell/cwd/env policy locally.
 - Path traversal rejection and deny-by-default empty `allowed_cwd`.
 - Env allowlist enforcement (dangerous vars blocked even with `*`).
@@ -41,6 +46,8 @@
 - Keep `agent_custom` tags out of authz unless you intentionally trust agent-reported custom labels.
 - Protect backup passwords; treat fleet restore as high privilege.
 - Place MCP behind private network / edge auth; do not rely on Host allowlists alone behind a reverse proxy.
+- **GUI session privilege checklist**: run the desktop helper under a standard interactive account (not built-in Administrator; no broad NOPASSWD sudo). Keep UAC enabled. Route elevated work through `elevated:true` + `elevation_policy`. Leave `desktop_policy.allow_os_launchers` false unless an Admin-reviewed computer-use grant explicitly needs OS Run/launcher shortcuts.
+- **MCP Host allowlist**: leave `MCP_ALLOWED_HOSTS` empty when `HECATE_PUBLIC_BASE_URL` is set (FQDN-only allowlist), or set it explicitly to the public FQDN without `localhost`.
 
 ## Granular authz model (1.2.0)
 

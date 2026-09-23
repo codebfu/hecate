@@ -16,6 +16,8 @@ const FIRST_VIOLATION_MESSAGE: &str = "content rejected because it does not fit 
 const LOCKOUT_MESSAGE: &str = "AI identity temporarily locked due to content policy violation; contact an administrator";
 const MAX_SCAN_BYTES: usize = 512 * 1024;
 const MAX_DECODE_PASSES: usize = 2;
+const DESKTOP_INPUT_BUFFER_CAP: usize = 256;
+const DESKTOP_INPUT_BUFFER_TTL_SECS: i64 = 300;
 
 #[derive(Debug, Clone, sqlx::FromRow)]
 struct ContentPolicyState {
@@ -60,6 +62,7 @@ pub async fn clear_lockout(pool: &PgPool, ai_identity_id: Uuid) -> ApiResult<()>
 pub async fn enforce_content_policy(
     pool: &PgPool,
     ai_identity_id: Uuid,
+    machine_id: Option<Uuid>,
     rules: &CapabilityProfileRules,
     command_name: &str,
     params: &serde_json::Value,
@@ -76,6 +79,30 @@ pub async fn enforce_content_policy(
     if let Err(reason) = scan_params(command_name, params, rules) {
         findings.push(reason);
     }
+
+    if let Some(machine_id) = machine_id {
+        if command_name == "desktop.window.focus" {
+            clear_desktop_input_buffer(pool, ai_identity_id, machine_id).await?;
+        } else if matches!(
+            command_name,
+            "desktop.type" | "desktop.key" | "desktop.session.input"
+        ) {
+            match append_and_scan_desktop_input_buffer(
+                pool,
+                ai_identity_id,
+                machine_id,
+                command_name,
+                params,
+                rules,
+            )
+            .await
+            {
+                Ok(()) => {}
+                Err(reason) => findings.push(reason),
+            }
+        }
+    }
+
     if findings.is_empty() {
         return Ok(());
     }
@@ -119,6 +146,171 @@ fn scan_params(
     if let Some(content) = params.get("content").and_then(|v| v.as_str()) {
         scan_text(content, rules)?;
     }
+    if let Some(key) = params.get("key").and_then(|v| v.as_str()) {
+        scan_text(key, rules)?;
+    }
+    if command_name == "desktop.session.input" {
+        if let Some(events) = params.get("events").and_then(|v| v.as_array()) {
+            for event in events {
+                if let Some(text) = event.get("text").and_then(|v| v.as_str()) {
+                    scan_text(text, rules)?;
+                }
+                if let Some(key) = event.get("key").and_then(|v| v.as_str()) {
+                    scan_text(key, rules)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn collect_desktop_input_chars(command_name: &str, params: &serde_json::Value) -> String {
+    let mut out = String::new();
+    match command_name {
+        "desktop.type" => {
+            if let Some(text) = params.get("text").and_then(|v| v.as_str()) {
+                out.push_str(text);
+            }
+        }
+        "desktop.key" => {
+            if let Some(chunk) = printable_key_chunk(params.get("key").and_then(|v| v.as_str())) {
+                out.push_str(&chunk);
+            }
+        }
+        "desktop.session.input" => {
+            if let Some(events) = params.get("events").and_then(|v| v.as_array()) {
+                for event in events {
+                    let action = event.get("action").and_then(|v| v.as_str()).unwrap_or("");
+                    match action {
+                        "type" => {
+                            if let Some(text) = event.get("text").and_then(|v| v.as_str()) {
+                                out.push_str(text);
+                            }
+                        }
+                        "key" => {
+                            if let Some(chunk) =
+                                printable_key_chunk(event.get("key").and_then(|v| v.as_str()))
+                            {
+                                out.push_str(&chunk);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+fn printable_key_chunk(key: Option<&str>) -> Option<String> {
+    let key = key?.trim();
+    if key.is_empty() {
+        return None;
+    }
+    // Single Unicode grapheme / character — character-by-character typing.
+    if key.chars().count() == 1 {
+        return Some(key.to_string());
+    }
+    // Named keys (Return, F1, Escape, …) do not contribute to the text buffer.
+    None
+}
+
+async fn clear_desktop_input_buffer(
+    pool: &PgPool,
+    ai_identity_id: Uuid,
+    machine_id: Uuid,
+) -> ApiResult<()> {
+    sqlx::query(
+        "DELETE FROM ai_desktop_input_buffers
+         WHERE ai_identity_id = $1 AND machine_id = $2",
+    )
+    .bind(ai_identity_id)
+    .bind(machine_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn append_and_scan_desktop_input_buffer(
+    pool: &PgPool,
+    ai_identity_id: Uuid,
+    machine_id: Uuid,
+    command_name: &str,
+    params: &serde_json::Value,
+    rules: &CapabilityProfileRules,
+) -> Result<(), String> {
+    let chunk = collect_desktop_input_chars(command_name, params);
+    if chunk.is_empty() {
+        // Still scan existing buffer (e.g. Return after typing a LOLBin name).
+        let existing = load_desktop_input_buffer(pool, ai_identity_id, machine_id)
+            .await
+            .map_err(|e| format!("desktop input buffer load failed: {e:?}"))?;
+        if !existing.is_empty() {
+            scan_text(&existing, rules)?;
+        }
+        return Ok(());
+    }
+
+    let previous = load_desktop_input_buffer(pool, ai_identity_id, machine_id)
+        .await
+        .map_err(|e| format!("desktop input buffer load failed: {e:?}"))?;
+    let mut combined = previous;
+    combined.push_str(&chunk);
+    if combined.len() > DESKTOP_INPUT_BUFFER_CAP {
+        let excess = combined.len() - DESKTOP_INPUT_BUFFER_CAP;
+        combined = combined[excess..].to_string();
+    }
+    // Persist before scanning so fragmented typing remains visible across requests.
+    persist_desktop_input_buffer(pool, ai_identity_id, machine_id, &combined)
+        .await
+        .map_err(|e| format!("desktop input buffer persist failed: {e:?}"))?;
+    scan_text(&combined, rules)?;
+    Ok(())
+}
+
+async fn load_desktop_input_buffer(
+    pool: &PgPool,
+    ai_identity_id: Uuid,
+    machine_id: Uuid,
+) -> ApiResult<String> {
+    let row: Option<(String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+        "SELECT buffer, updated_at FROM ai_desktop_input_buffers
+         WHERE ai_identity_id = $1 AND machine_id = $2",
+    )
+    .bind(ai_identity_id)
+    .bind(machine_id)
+    .fetch_optional(pool)
+    .await?;
+    let Some((buffer, updated_at)) = row else {
+        return Ok(String::new());
+    };
+    let age = chrono::Utc::now().signed_duration_since(updated_at);
+    if age.num_seconds() > DESKTOP_INPUT_BUFFER_TTL_SECS {
+        clear_desktop_input_buffer(pool, ai_identity_id, machine_id).await?;
+        return Ok(String::new());
+    }
+    Ok(buffer)
+}
+
+async fn persist_desktop_input_buffer(
+    pool: &PgPool,
+    ai_identity_id: Uuid,
+    machine_id: Uuid,
+    buffer: &str,
+) -> ApiResult<()> {
+    sqlx::query(
+        "INSERT INTO ai_desktop_input_buffers (ai_identity_id, machine_id, buffer, updated_at)
+         VALUES ($1, $2, $3, now())
+         ON CONFLICT (ai_identity_id, machine_id) DO UPDATE
+         SET buffer = EXCLUDED.buffer, updated_at = now()",
+    )
+    .bind(ai_identity_id)
+    .bind(machine_id)
+    .bind(buffer)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -399,6 +591,7 @@ mod tests {
                 allowed_env: vec![],
             },
             elevation_policy: Default::default(),
+            desktop_policy: Default::default(),
             max_output_bytes: hecate_protocol::permissions::DEFAULT_MAX_OUTPUT_BYTES,
             max_file_bytes: hecate_protocol::permissions::DEFAULT_MAX_FILE_BYTES,
             timeout_secs: hecate_protocol::permissions::DEFAULT_TIMEOUT_SECS,
@@ -442,6 +635,81 @@ mod tests {
             &rules
         )
         .is_ok());
+    }
+
+    #[test]
+    fn rejects_nested_session_input_text() {
+        let rules = rules_with_bins(&["id", "whoami", "hostname", "echo"]);
+        assert!(scan_params(
+            "desktop.type",
+            &serde_json::json!({ "text": "bash" }),
+            &rules
+        )
+        .is_err());
+        assert!(scan_params(
+            "desktop.session.input",
+            &serde_json::json!({
+                "session_id": "00000000-0000-4000-8000-000000000001",
+                "events": [{ "action": "type", "text": "bash" }]
+            }),
+            &rules
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn scans_desktop_key_field() {
+        let rules = rules_with_bins(&["id", "whoami", "hostname", "echo"]);
+        assert!(scan_params(
+            "desktop.key",
+            &serde_json::json!({ "key": "powershell" }),
+            &rules
+        )
+        .is_err());
+        assert!(scan_params(
+            "desktop.key",
+            &serde_json::json!({ "key": "Return" }),
+            &rules
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn collect_desktop_input_chars_from_key_and_type() {
+        assert_eq!(
+            collect_desktop_input_chars(
+                "desktop.key",
+                &serde_json::json!({ "key": "p" })
+            ),
+            "p"
+        );
+        assert_eq!(
+            collect_desktop_input_chars(
+                "desktop.key",
+                &serde_json::json!({ "key": "Return" })
+            ),
+            ""
+        );
+        assert_eq!(
+            collect_desktop_input_chars(
+                "desktop.type",
+                &serde_json::json!({ "text": "power" })
+            ),
+            "power"
+        );
+        assert_eq!(
+            collect_desktop_input_chars(
+                "desktop.session.input",
+                &serde_json::json!({
+                    "events": [
+                        { "action": "type", "text": "sh" },
+                        { "action": "key", "key": "e" },
+                        { "action": "key", "key": "Return" }
+                    ]
+                })
+            ),
+            "she"
+        );
     }
 
     #[test]

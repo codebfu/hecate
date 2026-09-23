@@ -158,6 +158,10 @@ export interface ElevationPolicy {
   allowed_binaries: string[];
 }
 
+export interface DesktopPolicy {
+  allow_os_launchers: boolean;
+}
+
 export interface FleetScope {
   id: string;
   name: string;
@@ -183,6 +187,7 @@ export interface CapabilityProfile {
   allowed_admin_commands: string[];
   shell_policy: ShellPolicy;
   elevation_policy: ElevationPolicy;
+  desktop_policy: DesktopPolicy;
   max_output_bytes: number;
   max_file_bytes: number;
   timeout_secs: number;
@@ -296,6 +301,7 @@ export interface CapabilityProfileInput {
   allowed_admin_commands?: string[];
   shell_policy?: ShellPolicy;
   elevation_policy?: ElevationPolicy;
+  desktop_policy?: DesktopPolicy;
   max_output_bytes?: number;
   max_file_bytes?: number;
   timeout_secs?: number;
@@ -309,6 +315,7 @@ export interface CapabilityProfilePatch {
   allowed_admin_commands?: string[];
   shell_policy?: ShellPolicy;
   elevation_policy?: ElevationPolicy;
+  desktop_policy?: DesktopPolicy;
   max_output_bytes?: number;
   max_file_bytes?: number;
   timeout_secs?: number;

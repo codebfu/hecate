@@ -237,6 +237,7 @@ pub async fn authorize_agent_command(
     crate::content_policy::enforce_content_policy(
         pool,
         identity_id,
+        Some(machine_id),
         &rules,
         command_name,
         params,
@@ -392,6 +393,7 @@ mod tests {
             allowed_admin_commands: vec![],
             shell_policy: ShellPolicy::default(),
             elevation_policy: Default::default(),
+            desktop_policy: Default::default(),
             max_output_bytes: 1,
             max_file_bytes: 1,
             timeout_secs: 1,

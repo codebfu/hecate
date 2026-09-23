@@ -630,6 +630,7 @@ mod tests {
             allowed_admin_commands: vec![],
             shell_policy: Default::default(),
             elevation_policy: Default::default(),
+            desktop_policy: Default::default(),
             max_output_bytes: hecate_protocol::permissions::DEFAULT_MAX_OUTPUT_BYTES,
             max_file_bytes: hecate_protocol::permissions::DEFAULT_MAX_FILE_BYTES,
             timeout_secs: hecate_protocol::permissions::DEFAULT_TIMEOUT_SECS,

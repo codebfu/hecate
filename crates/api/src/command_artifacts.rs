@@ -66,6 +66,7 @@ async fn content_scan_rules(
         allowed_admin_commands: vec![],
         shell_policy: ShellPolicy::default(),
         elevation_policy: ElevationPolicy::default(),
+        desktop_policy: Default::default(),
         max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
         max_file_bytes: DEFAULT_MAX_FILE_BYTES,
         timeout_secs: DEFAULT_TIMEOUT_SECS,
@@ -84,6 +85,9 @@ async fn content_scan_rules(
         }
         rules.max_output_bytes = rules.max_output_bytes.max(profile.max_output_bytes);
         rules.max_file_bytes = rules.max_file_bytes.max(profile.max_file_bytes);
+        if profile.desktop_policy.allow_os_launchers {
+            rules.desktop_policy.allow_os_launchers = true;
+        }
     }
     Ok(rules)
 }
@@ -119,6 +123,7 @@ pub async fn store_input_artifact(
     crate::content_policy::enforce_content_policy(
         pool,
         ai_identity_id,
+        None,
         &rules,
         "file.push",
         &serde_json::json!({}),

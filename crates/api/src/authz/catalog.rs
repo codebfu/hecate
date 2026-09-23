@@ -66,6 +66,7 @@ fn strip_fleet_scope_for_self_service(mut scope: hecate_protocol::authz::FleetSc
 fn strip_capability_profile_for_self_service(mut profile: CapabilityProfile) -> CapabilityProfile {
     profile.shell_policy = Default::default();
     profile.elevation_policy = Default::default();
+    profile.desktop_policy = Default::default();
     profile
 }
 

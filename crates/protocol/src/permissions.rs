@@ -88,6 +88,7 @@ pub fn validate_path_command_cwd_requirement_legacy(rules: &AiPermissionRules) -
         allowed_admin_commands: rules.allowed_admin_commands.clone(),
         shell_policy: rules.shell_policy.clone(),
         elevation_policy: rules.elevation_policy.clone(),
+        desktop_policy: DesktopPolicy::default(),
         max_output_bytes: rules.max_output_bytes,
         max_file_bytes: rules.max_file_bytes,
         timeout_secs: rules.timeout_secs,
@@ -111,6 +112,35 @@ pub struct ElevationPolicy {
     pub enabled: bool,
     #[serde(default)]
     pub allowed_binaries: Vec<String>,
+}
+
+/// Desktop input policy. OS launcher hotkeys are denied by default.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(default)]
+pub struct DesktopPolicy {
+    /// When false (default), block known OS launcher / Run-dialog hotkeys
+    /// (`Win+R`, `Alt+F2`, `Ctrl+Alt+T`, …) on `desktop.key` / session key events.
+    #[serde(default)]
+    pub allow_os_launchers: bool,
+}
+
+/// Desktop commands that inject input or open a computer-use session. Requesting
+/// any of these forces Admin classification of the permission request.
+pub const ADMIN_REVIEW_DESKTOP_COMMANDS: &[&str] = &[
+    "desktop.type",
+    "desktop.key",
+    "desktop.click",
+    "desktop.app.launch",
+    "desktop.session.input",
+    "desktop.session.open",
+];
+
+pub fn profile_grants_admin_review_desktop(allowed_commands: &[String]) -> bool {
+    allowed_commands.iter().any(|cmd| {
+        ADMIN_REVIEW_DESKTOP_COMMANDS
+            .iter()
+            .any(|sensitive| *sensitive == cmd.as_str())
+    })
 }
 
 pub const DEFAULT_MAX_OUTPUT_BYTES: u32 = 1_048_576;
@@ -191,6 +221,8 @@ pub struct CapabilityProfileRules {
     pub allowed_admin_commands: Vec<String>,
     pub shell_policy: ShellPolicy,
     pub elevation_policy: ElevationPolicy,
+    #[serde(default)]
+    pub desktop_policy: DesktopPolicy,
     pub max_output_bytes: u32,
     pub max_file_bytes: u32,
     pub timeout_secs: u32,

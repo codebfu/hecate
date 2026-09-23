@@ -8,8 +8,9 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::permissions::{
-    validate_path_command_cwd_requirement, CapabilityProfileRules, ShellPolicy, ElevationPolicy,
-    DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_FILE_BYTES, DEFAULT_MAX_OUTPUT_BYTES, DEFAULT_TIMEOUT_SECS,
+    validate_path_command_cwd_requirement, CapabilityProfileRules, DesktopPolicy, ShellPolicy,
+    ElevationPolicy, DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_FILE_BYTES, DEFAULT_MAX_OUTPUT_BYTES,
+    DEFAULT_TIMEOUT_SECS,
 };
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -163,6 +164,8 @@ pub struct CapabilityProfile {
     pub shell_policy: ShellPolicy,
     #[serde(default)]
     pub elevation_policy: ElevationPolicy,
+    #[serde(default)]
+    pub desktop_policy: DesktopPolicy,
     #[serde(default = "default_max_output_bytes")]
     pub max_output_bytes: u32,
     #[serde(default = "default_max_file_bytes")]
@@ -198,6 +201,7 @@ impl CapabilityProfile {
             allowed_admin_commands: self.allowed_admin_commands.clone(),
             shell_policy: self.shell_policy.clone(),
             elevation_policy: self.elevation_policy.clone(),
+            desktop_policy: self.desktop_policy.clone(),
             max_output_bytes: self.max_output_bytes,
             max_file_bytes: self.max_file_bytes,
             timeout_secs: self.timeout_secs,
@@ -387,6 +391,8 @@ pub struct ProposedCapabilityProfile {
     #[serde(default)]
     pub elevation_policy: ElevationPolicy,
     #[serde(default)]
+    pub desktop_policy: DesktopPolicy,
+    #[serde(default)]
     pub max_output_bytes: Option<u32>,
     #[serde(default)]
     pub max_file_bytes: Option<u32>,
@@ -505,6 +511,7 @@ mod tests {
             allowed_admin_commands: vec![],
             shell_policy: ShellPolicy::default(),
             elevation_policy: ElevationPolicy::default(),
+            desktop_policy: DesktopPolicy::default(),
             max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
             max_file_bytes: DEFAULT_MAX_FILE_BYTES,
             timeout_secs: DEFAULT_TIMEOUT_SECS,
