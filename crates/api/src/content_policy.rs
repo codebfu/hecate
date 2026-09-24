@@ -258,16 +258,25 @@ async fn append_and_scan_desktop_input_buffer(
         .map_err(|e| format!("desktop input buffer load failed: {e:?}"))?;
     let mut combined = previous;
     combined.push_str(&chunk);
-    if combined.len() > DESKTOP_INPUT_BUFFER_CAP {
-        let excess = combined.len() - DESKTOP_INPUT_BUFFER_CAP;
-        combined = combined[excess..].to_string();
-    }
+    combined = truncate_desktop_input_buffer(combined, DESKTOP_INPUT_BUFFER_CAP);
     // Persist before scanning so fragmented typing remains visible across requests.
     persist_desktop_input_buffer(pool, ai_identity_id, machine_id, &combined)
         .await
         .map_err(|e| format!("desktop input buffer persist failed: {e:?}"))?;
     scan_text(&combined, rules)?;
     Ok(())
+}
+
+/// Keep at most `max_bytes` of UTF-8, dropping from the front on a char boundary.
+fn truncate_desktop_input_buffer(s: String, max_bytes: usize) -> String {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut start = s.len() - max_bytes;
+    while start < s.len() && !s.is_char_boundary(start) {
+        start += 1;
+    }
+    s[start..].to_string()
 }
 
 async fn load_desktop_input_buffer(
@@ -710,6 +719,23 @@ mod tests {
             ),
             "she"
         );
+    }
+
+    #[test]
+    fn truncate_desktop_input_buffer_respects_utf8_boundaries() {
+        // € is 3 bytes in UTF-8. "aaa" (3) + 86×€ (258) = 261 bytes.
+        // A naive byte slice at excess would land mid-character and panic.
+        let mut s = String::from("aaa");
+        for _ in 0..86 {
+            s.push('€');
+        }
+        assert!(s.len() > DESKTOP_INPUT_BUFFER_CAP);
+        let trimmed = truncate_desktop_input_buffer(s, DESKTOP_INPUT_BUFFER_CAP);
+        assert!(trimmed.len() <= DESKTOP_INPUT_BUFFER_CAP);
+        assert!(trimmed.is_char_boundary(0));
+        assert!(trimmed.chars().all(|c| c == '€' || c == 'a'));
+        // Must not start mid-€ (would be invalid UTF-8 / panic above).
+        assert!(trimmed.starts_with('€') || trimmed.starts_with('a'));
     }
 
     #[test]

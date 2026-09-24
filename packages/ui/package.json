@@ -1,6 +1,6 @@
 {
   "name": "@hecate/ui",
-  "version": "1.1.5",
+  "version": "1.1.6",
   "private": true,
   "type": "module",
   "description": "Hecate operator UI — thin client to Rust API",
