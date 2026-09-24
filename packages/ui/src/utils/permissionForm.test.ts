@@ -96,6 +96,7 @@ describe("authz utils", () => {
         allowed_env: [],
       },
       elevation_policy: { enabled: false, allowed_binaries: [] },
+      desktop_policy: { allow_os_launchers: false },
       max_output_bytes: 2048,
       max_file_bytes: 52_428_800,
       timeout_secs: 10,
