@@ -336,6 +336,12 @@ fn detect_decode_pipeline(argv: &[String]) -> Result<(), String> {
             || a.ends_with("/python3")
             || a.ends_with("/perl")
             || a.ends_with("/ruby")
+            || a.ends_with("/osascript")
+            || a.ends_with("/swift")
+            || a.ends_with("/node")
+            || a.ends_with("/php")
+            || a.ends_with("/lua")
+            || a.ends_with("/tclsh")
             || a.ends_with("\\cmd.exe")
             || a.ends_with("/cmd.exe")
             || a.ends_with("\\powershell.exe")
@@ -346,6 +352,14 @@ fn detect_decode_pipeline(argv: &[String]) -> Result<(), String> {
             || a == "bash"
             || a == "python"
             || a == "python3"
+            || a == "perl"
+            || a == "ruby"
+            || a == "osascript"
+            || a == "swift"
+            || a == "node"
+            || a == "php"
+            || a == "lua"
+            || a == "tclsh"
             || a == "cmd"
             || a == "cmd.exe"
             || a == "powershell"
@@ -459,6 +473,79 @@ fn looks_like_binary_ref(token: &str) -> bool {
             | "sc.exe"
             | "schtasks"
             | "schtasks.exe"
+            // macOS + missing Unix interpreters / LOLBins (content-scan deny-by-detection)
+            | "osascript"
+            | "osacompile"
+            | "swift"
+            | "jsc"
+            | "xcrun"
+            | "php"
+            | "lua"
+            | "luajit"
+            | "tclsh"
+            | "wish"
+            | "expect"
+            | "awk"
+            | "gawk"
+            | "nawk"
+            | "ksh"
+            | "tcsh"
+            | "csh"
+            | "fish"
+            | "java"
+            | "jshell"
+            | "jrunscript"
+            | "automator"
+            | "open"
+            | "launchctl"
+            | "caffeinate"
+            | "xargs"
+            | "find"
+            | "env"
+            | "nohup"
+            | "nice"
+            | "stdbuf"
+            | "script"
+            | "tmux"
+            | "screen"
+            | "make"
+            | "ssh"
+            | "sshpass"
+            | "at"
+            | "atrun"
+            | "crontab"
+            | "watch"
+            | "sqlite3"
+            | "dtrace"
+            | "dtruss"
+            | "dscl"
+            | "dseditgroup"
+            | "sysadminctl"
+            | "createhomedir"
+            | "security"
+            | "installer"
+            | "profiles"
+            | "defaults"
+            | "nc"
+            | "ncat"
+            | "netcat"
+            | "socat"
+            | "ftp"
+            | "tftp"
+            | "ditto"
+            | "hdiutil"
+            | "bsdtar"
+            | "unzip"
+            | "gunzip"
+            | "xxd"
+            | "uudecode"
+            | "screencapture"
+            | "pbpaste"
+            | "pbcopy"
+            | "mdfind"
+            | "xattr"
+            | "spctl"
+            | "codesign"
     )
 }
 
@@ -763,6 +850,104 @@ mod tests {
             "-d".into(),
             "|".into(),
             "cmd.exe".into(),
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn rejects_macos_binaries_in_desktop_input() {
+        let rules = rules_with_bins(&["id", "whoami", "hostname", "echo"]);
+        let rejected = [
+            "osascript",
+            "open",
+            "open -b com.apple.Terminal",
+            "swift",
+            "osacompile",
+            "automator",
+            "launchctl",
+            "dseditgroup",
+            "sysadminctl",
+            "security",
+            "sqlite3",
+            "screencapture",
+            "xattr",
+            "hdiutil",
+            "installer",
+            "OSASCRIPT",
+        ];
+        for text in rejected {
+            assert!(
+                scan_params("desktop.type", &serde_json::json!({ "text": text }), &rules).is_err(),
+                "desktop.type should reject {text}"
+            );
+            // Single-token key field (multi-word strings are typed via desktop.type).
+            if !text.contains(' ') {
+                assert!(
+                    scan_params("desktop.key", &serde_json::json!({ "key": text }), &rules)
+                        .is_err(),
+                    "desktop.key should reject {text}"
+                );
+            }
+            assert!(
+                scan_params(
+                    "desktop.session.input",
+                    &serde_json::json!({
+                        "session_id": "00000000-0000-4000-8000-000000000001",
+                        "events": [{ "action": "type", "text": text }]
+                    }),
+                    &rules
+                )
+                .is_err(),
+                "desktop.session.input should reject {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_allowlisted_macos_typed_text() {
+        let rules = rules_with_bins(&["id", "whoami", "hostname", "echo"]);
+        for text in ["echo hello world", "id", "whoami"] {
+            assert!(
+                scan_params("desktop.type", &serde_json::json!({ "text": text }), &rules).is_ok(),
+                "desktop.type should accept {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_osascript_reassembled_from_key_buffer() {
+        let rules = rules_with_bins(&["id", "whoami", "hostname", "echo"]);
+        let mut buffer = String::new();
+        for ch in ["o", "s", "a", "s", "c", "r", "i", "p", "t"] {
+            buffer.push_str(&collect_desktop_input_chars(
+                "desktop.key",
+                &serde_json::json!({ "key": ch }),
+            ));
+        }
+        assert_eq!(buffer, "osascript");
+        assert!(scan_text(&buffer, &rules).is_err());
+    }
+
+    #[test]
+    fn rejects_macos_decode_pipeline() {
+        assert!(detect_decode_pipeline(&[
+            "/bin/sh".into(),
+            "-c".into(),
+            "base64 -d x | osascript".into(),
+        ])
+        .is_err());
+        assert!(detect_decode_pipeline(&[
+            "base64".into(),
+            "-d".into(),
+            "|".into(),
+            "osascript".into(),
+        ])
+        .is_err());
+        assert!(detect_decode_pipeline(&[
+            "base64".into(),
+            "-d".into(),
+            "|".into(),
+            "/usr/bin/swift".into(),
         ])
         .is_err());
     }
