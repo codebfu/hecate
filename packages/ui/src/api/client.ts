@@ -527,6 +527,22 @@ export interface ProxySummary {
   attestation?: unknown;
 }
 
+export type ProxyRateLimitClass = "enroll" | "allowed" | "unrecognized";
+
+export interface ProxyRateLimitEntry {
+  ip: string;
+  class: ProxyRateLimitClass;
+  count: number;
+  limit: number;
+  window_started_at: string;
+}
+
+export interface ProxyRateLimitsResponse {
+  proxy_id: string;
+  updated_at?: string | null;
+  entries: ProxyRateLimitEntry[];
+}
+
 export type AuditRefKind =
   | "ai_identity"
   | "operator"
@@ -861,6 +877,17 @@ export class ApiClient {
 
   async deleteProxy(id: string): Promise<void> {
     await this.request("DELETE", `/admin/proxies/${id}`);
+  }
+
+  async getProxyRateLimits(id: string): Promise<ProxyRateLimitsResponse> {
+    return this.request<ProxyRateLimitsResponse>("GET", `/admin/proxies/${id}/rate-limits`);
+  }
+
+  async unbanProxyRateLimit(
+    id: string,
+    body: { ip: string; class: ProxyRateLimitClass },
+  ): Promise<void> {
+    await this.request("POST", `/admin/proxies/${id}/rate-limits/unban`, body);
   }
 
   async createProxyEnrollmentToken(

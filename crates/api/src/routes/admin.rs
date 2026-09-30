@@ -79,6 +79,12 @@ struct UpdateAgentBody {
 }
 
 #[derive(Deserialize)]
+struct UnbanProxyRateLimitBody {
+    ip: String,
+    class: String,
+}
+
+#[derive(Deserialize)]
 struct CreateEnrollmentTokenBody {
     bound_tags: Option<Vec<String>>,
     machine_id: Option<Uuid>,
@@ -171,6 +177,14 @@ pub fn router() -> Router<AppState> {
         .route(
             "/api/v1/admin/proxies/{id}/state",
             patch(update_proxy_state),
+        )
+        .route(
+            "/api/v1/admin/proxies/{id}/rate-limits",
+            get(list_proxy_rate_limits),
+        )
+        .route(
+            "/api/v1/admin/proxies/{id}/rate-limits/unban",
+            post(unban_proxy_rate_limit),
         )
         .route(
             "/api/v1/admin/proxy-enrollment/settings",
@@ -1869,6 +1883,120 @@ async fn delete_proxy(
     )
     .await?;
     Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn list_proxy_rate_limits(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    admin_auth::require_operator(&state, &jar).await?;
+    let exists: Option<Uuid> = sqlx::query_scalar("SELECT id FROM proxies WHERE id = $1")
+        .bind(id)
+        .fetch_optional(&state.pool)
+        .await?;
+    if exists.is_none() {
+        return Err(ApiError::NotFound);
+    }
+
+    let row: Option<(serde_json::Value, chrono::DateTime<Utc>)> = sqlx::query_as(
+        "SELECT entries, updated_at FROM proxy_rate_limit_snapshots WHERE proxy_id = $1",
+    )
+    .bind(id)
+    .fetch_optional(&state.pool)
+    .await?;
+
+    let (entries, updated_at) = match row {
+        Some((entries, updated_at)) => (entries, Some(updated_at.to_rfc3339())),
+        None => (serde_json::json!([]), None),
+    };
+
+    Ok(Json(serde_json::json!({
+        "proxy_id": id,
+        "updated_at": updated_at,
+        "entries": entries,
+    })))
+}
+
+async fn unban_proxy_rate_limit(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(body): Json<UnbanProxyRateLimitBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let admin = admin_auth::require_admin(&state, &jar, &headers).await?;
+    let ip = body.ip.trim();
+    if ip.is_empty() || ip.len() > 64 {
+        return Err(ApiError::BadRequest("invalid ip".into()));
+    }
+    let class = body.class.trim();
+    if !matches!(class, "enroll" | "allowed" | "unrecognized") {
+        return Err(ApiError::BadRequest(
+            "class must be enroll, allowed, or unrecognized".into(),
+        ));
+    }
+
+    let exists: Option<Uuid> = sqlx::query_scalar("SELECT id FROM proxies WHERE id = $1")
+        .bind(id)
+        .fetch_optional(&state.pool)
+        .await?;
+    if exists.is_none() {
+        return Err(ApiError::NotFound);
+    }
+
+    let unban_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO proxy_rate_limit_unbans (proxy_id, client_ip, class)
+         VALUES ($1, $2, $3)
+         RETURNING id",
+    )
+    .bind(id)
+    .bind(ip)
+    .bind(class)
+    .fetch_one(&state.pool)
+    .await?;
+
+    // Optimistically drop from the displayed snapshot until the next heartbeat.
+    if let Some((mut entries,)) =
+        sqlx::query_as::<_, (serde_json::Value,)>(
+            "SELECT entries FROM proxy_rate_limit_snapshots WHERE proxy_id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&state.pool)
+        .await?
+    {
+        if let Some(arr) = entries.as_array_mut() {
+            arr.retain(|entry| {
+                let entry_ip = entry.get("ip").and_then(|v| v.as_str()).unwrap_or("");
+                let entry_class = entry.get("class").and_then(|v| v.as_str()).unwrap_or("");
+                !(entry_ip == ip && entry_class == class)
+            });
+            sqlx::query(
+                "UPDATE proxy_rate_limit_snapshots SET entries = $2, updated_at = now() WHERE proxy_id = $1",
+            )
+            .bind(id)
+            .bind(entries)
+            .execute(&state.pool)
+            .await?;
+        }
+    }
+
+    append_audit(
+        &state.pool,
+        &admin.session.login,
+        "proxy.rate_limit.unban",
+        &id.to_string(),
+        "",
+        &serde_json::json!({
+            "proxy_id": id,
+            "ip": ip,
+            "class": class,
+            "unban_id": unban_id,
+        }),
+    )
+    .await?;
+
+    Ok(Json(serde_json::json!({ "ok": true, "unban_id": unban_id })))
 }
 
 async fn get_proxy_enrollment_settings(

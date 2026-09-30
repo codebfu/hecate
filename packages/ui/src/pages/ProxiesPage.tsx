@@ -2,15 +2,21 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { apiClient } from "../api/client.js";
+import {
+  apiClient,
+  type ProxyRateLimitClass,
+  type ProxyRateLimitEntry,
+} from "../api/client.js";
 import { ErrorState, LoadingState, PageHeader } from "../components/Layout.js";
 import { useToast } from "../components/ToastProvider.js";
 import { ReenrollmentPanel } from "../components/ReenrollmentPanel.js";
 import { useSession } from "../hooks/useSession.js";
 
 const LIST_REFETCH_MS = 15_000;
+const RATE_LIMIT_REFETCH_MS = 60_000;
+const RATE_LIMIT_CLASSES: ProxyRateLimitClass[] = ["enroll", "allowed", "unrecognized"];
 
 export function ProxiesPage() {
   const { proxyId } = useParams();
@@ -96,6 +102,7 @@ export function ProxiesPage() {
             </dd>
           </div>
         </dl>
+        <ProxyRateLimitsPanel proxyId={proxy.id} isAdmin={Boolean(isAdmin)} />
         {isAdmin && proxy.state === "pending_approval" ? (
           <div className="actions">
             <button
@@ -192,6 +199,115 @@ export function ProxiesPage() {
         </tbody>
       </table>
       {isAdmin ? <ProxyEnrollmentPanel /> : null}
+    </section>
+  );
+}
+
+function ProxyRateLimitsPanel({
+  proxyId,
+  isAdmin,
+}: {
+  proxyId: string;
+  isAdmin: boolean;
+}) {
+  const toast = useToast();
+  const queryClient = useQueryClient();
+
+  const rateLimitsQuery = useQuery({
+    queryKey: ["proxy-rate-limits", proxyId],
+    queryFn: () => apiClient.getProxyRateLimits(proxyId),
+    refetchInterval: RATE_LIMIT_REFETCH_MS,
+  });
+
+  const unbanMutation = useMutation({
+    mutationFn: (entry: { ip: string; class: ProxyRateLimitClass }) =>
+      apiClient.unbanProxyRateLimit(proxyId, entry),
+    onSuccess: async () => {
+      toast.success("Unban queued for next proxy sync.");
+      await queryClient.invalidateQueries({ queryKey: ["proxy-rate-limits", proxyId] });
+    },
+    onError: (error) => {
+      toast.error(error instanceof Error ? error.message : "Failed to queue unban.");
+    },
+  });
+
+  const byClass = useMemo(() => {
+    const map: Record<ProxyRateLimitClass, ProxyRateLimitEntry[]> = {
+      enroll: [],
+      allowed: [],
+      unrecognized: [],
+    };
+    for (const entry of rateLimitsQuery.data?.entries ?? []) {
+      if (entry.class in map) {
+        map[entry.class].push(entry);
+      }
+    }
+    return map;
+  }, [rateLimitsQuery.data?.entries]);
+
+  return (
+    <section className="card stack" style={{ marginTop: "1.5rem" }}>
+      <h2>Rate limits</h2>
+      <p className="muted">
+        Client IPs currently over quota on this Propylaea (per class, 60s window). Unban resets the
+        counter on the next proxy sync.
+      </p>
+      {rateLimitsQuery.data?.updated_at ? (
+        <p className="muted">
+          Snapshot updated: <code>{rateLimitsQuery.data.updated_at}</code>
+        </p>
+      ) : (
+        <p className="muted">No rate-limit snapshot yet (waiting for proxy heartbeat).</p>
+      )}
+      {rateLimitsQuery.isLoading ? <LoadingState /> : null}
+      {rateLimitsQuery.error ? <ErrorState message="Failed to load rate limits." /> : null}
+      {!rateLimitsQuery.isLoading && !rateLimitsQuery.error
+        ? RATE_LIMIT_CLASSES.map((className) => (
+            <div key={className} className="stack">
+              <h3>{className}</h3>
+              {byClass[className].length === 0 ? (
+                <p className="muted">No limited IPs.</p>
+              ) : (
+                <table className="data-table">
+                  <thead>
+                    <tr>
+                      <th>IP</th>
+                      <th>Count</th>
+                      <th>Window started</th>
+                      {isAdmin ? <th /> : null}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {byClass[className].map((entry) => (
+                      <tr key={`${entry.class}:${entry.ip}`}>
+                        <td>
+                          <code>{entry.ip}</code>
+                        </td>
+                        <td>
+                          {entry.count}/{entry.limit}
+                        </td>
+                        <td>{entry.window_started_at}</td>
+                        {isAdmin ? (
+                          <td>
+                            <button
+                              type="button"
+                              disabled={unbanMutation.isPending}
+                              onClick={() =>
+                                unbanMutation.mutate({ ip: entry.ip, class: entry.class })
+                              }
+                            >
+                              Unban
+                            </button>
+                          </td>
+                        ) : null}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          ))
+        : null}
     </section>
   );
 }
