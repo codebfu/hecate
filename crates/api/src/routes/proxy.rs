@@ -10,8 +10,8 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use hecate_protocol::agent::AgentState;
 use hecate_protocol::proxy::{
-    paths, ProxyEnrollRequest, ProxyEnrollResponse, ProxyHeartbeatRequest, ProxyState,
-    ProxySyncAgent, ProxySyncEnrollmentToken, ProxySyncResponse,
+    paths, ProxyEnrollRequest, ProxyEnrollResponse, ProxyHeartbeatRequest, ProxyRateLimitClass,
+    ProxyRateLimitUnban, ProxyState, ProxySyncAgent, ProxySyncEnrollmentToken, ProxySyncResponse,
 };
 use uuid::Uuid;
 
@@ -265,6 +265,7 @@ async fn sync(
 
     let enrollment_tokens = load_agent_enrollment_tokens(&state.pool).await?;
     let proxy_enrollment_tokens = load_proxy_enrollment_tokens(&state.pool).await?;
+    let rate_limit_unbans = claim_rate_limit_unbans(&state.pool, auth.proxy_id).await?;
 
     sqlx::query("UPDATE proxies SET last_seen_at = now() WHERE id = $1")
         .bind(auth.proxy_id)
@@ -275,6 +276,7 @@ async fn sync(
         agents,
         enrollment_tokens,
         proxy_enrollment_tokens,
+        rate_limit_unbans,
     }))
 }
 
@@ -362,7 +364,56 @@ async fn heartbeat(
     .execute(&state.pool)
     .await?;
 
+    let entries = serde_json::to_value(&payload.rate_limits).unwrap_or_else(|_| serde_json::json!([]));
+    sqlx::query(
+        "INSERT INTO proxy_rate_limit_snapshots (proxy_id, entries, updated_at)
+         VALUES ($1, $2, now())
+         ON CONFLICT (proxy_id) DO UPDATE
+         SET entries = EXCLUDED.entries, updated_at = now()",
+    )
+    .bind(auth.proxy_id)
+    .bind(entries)
+    .execute(&state.pool)
+    .await?;
+
     Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn claim_rate_limit_unbans(
+    pool: &sqlx::PgPool,
+    proxy_id: Uuid,
+) -> ApiResult<Vec<ProxyRateLimitUnban>> {
+    let mut tx = pool.begin().await?;
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT client_ip, class
+         FROM proxy_rate_limit_unbans
+         WHERE proxy_id = $1 AND delivered_at IS NULL
+         ORDER BY created_at ASC
+         FOR UPDATE",
+    )
+    .bind(proxy_id)
+    .fetch_all(&mut *tx)
+    .await?;
+
+    if !rows.is_empty() {
+        sqlx::query(
+            "UPDATE proxy_rate_limit_unbans
+             SET delivered_at = now()
+             WHERE proxy_id = $1 AND delivered_at IS NULL",
+        )
+        .bind(proxy_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+
+    Ok(rows
+        .into_iter()
+        .filter_map(|(ip, class)| {
+            let class = ProxyRateLimitClass::parse(&class)?;
+            Some(ProxyRateLimitUnban { ip, class })
+        })
+        .collect())
 }
 
 async fn ensure_proxy_active(state: &AppState, proxy_id: Uuid) -> ApiResult<()> {

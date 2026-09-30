@@ -35,11 +35,57 @@ pub struct ProxyEnrollResponse {
     pub state: ProxyState,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ProxyRateLimitClass {
+    Enroll,
+    Allowed,
+    Unrecognized,
+}
+
+impl ProxyRateLimitClass {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Enroll => "enroll",
+            Self::Allowed => "allowed",
+            Self::Unrecognized => "unrecognized",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "enroll" => Some(Self::Enroll),
+            "allowed" => Some(Self::Allowed),
+            "unrecognized" => Some(Self::Unrecognized),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ProxyRateLimitEntry {
+    pub ip: String,
+    pub class: ProxyRateLimitClass,
+    pub count: u32,
+    pub limit: u32,
+    /// RFC3339 timestamp when the current window started.
+    pub window_started_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ProxyRateLimitUnban {
+    pub ip: String,
+    pub class: ProxyRateLimitClass,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ProxyHeartbeatRequest {
     pub version: String,
     pub uptime_secs: u64,
     pub hostname: String,
+    /// Currently limited client IPs (count > limit), reported by Propylaea.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rate_limits: Vec<ProxyRateLimitEntry>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -71,6 +117,9 @@ pub struct ProxySyncResponse {
     pub enrollment_tokens: Vec<ProxySyncEnrollmentToken>,
     #[serde(default)]
     pub proxy_enrollment_tokens: Vec<ProxySyncEnrollmentToken>,
+    /// Pending operator unbans for this proxy (delivered once via sync).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rate_limit_unbans: Vec<ProxyRateLimitUnban>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
