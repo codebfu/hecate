@@ -463,6 +463,7 @@ async fn get_update_offer(
             &body.agent_version,
             body.desktop_version.as_deref(),
             body.proxmox_version.as_deref(),
+            body.preferred_installer.as_deref(),
         )
         .await?,
     ))
@@ -537,14 +538,15 @@ async fn download_feature_artifact(
         return Err(ApiError::Forbidden);
     }
 
-    let machine: Option<(String, String)> =
-        sqlx::query_as("SELECT os, arch FROM machines WHERE id = $1")
+    let machine: Option<(String, String, Vec<String>)> =
+        sqlx::query_as("SELECT os, arch, tags FROM machines WHERE id = $1")
             .bind(auth.agent_id)
             .fetch_optional(&state.pool)
             .await?;
-    let Some((os, arch)) = machine else {
+    let Some((os, arch, tags)) = machine else {
         return Err(ApiError::NotFound);
     };
+    let installer = crate::updates::installer_type_for_machine(&os, &tags, None);
 
     let Some(release) = crate::feature_repo::releases::get_pinned_release_for_download(
         &state.pool,
@@ -552,6 +554,7 @@ async fn download_feature_artifact(
         &os,
         &arch,
         version,
+        &installer,
     )
     .await?
     else {

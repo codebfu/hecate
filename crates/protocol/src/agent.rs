@@ -168,6 +168,9 @@ pub struct UpdateOfferRequest {
     /// Local Proxmox console helper version when installed; omit when not present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxmox_version: Option<String>,
+    /// Preferred Linux installer (`deb` or `rpm`). Omitted on non-Linux or older agents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preferred_installer: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

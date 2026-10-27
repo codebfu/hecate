@@ -627,14 +627,22 @@ async fn request_machine_agent_update(
     if updates::has_pending_agent_update(&state.pool, id).await? {
         return Err(ApiError::Conflict("agent update is already queued".into()));
     }
-    let latest_agent =
-        updates::latest_component_release_version(&state.pool, &machine.os, &machine.arch, "agent")
-            .await?;
+    let installer =
+        updates::installer_type_for_machine(&machine.os, &machine.tags, None);
+    let latest_agent = updates::latest_component_release_version(
+        &state.pool,
+        &machine.os,
+        &machine.arch,
+        "agent",
+        &installer,
+    )
+    .await?;
     let latest_desktop = updates::latest_component_release_version(
         &state.pool,
         &machine.os,
         &machine.arch,
         "desktop",
+        &installer,
     )
     .await?;
     let latest_proxmox = updates::latest_component_release_version(
@@ -642,6 +650,7 @@ async fn request_machine_agent_update(
         &machine.os,
         &machine.arch,
         "proxmox",
+        &installer,
     )
     .await?;
     let current_agent = machine.agent_version.as_deref();
@@ -763,11 +772,14 @@ async fn request_all_agent_updates(
     let mut skipped_already_queued = 0usize;
 
     for entry in rows {
+        let installer =
+            updates::installer_type_for_machine(&entry.row.os, &entry.row.tags, None);
         let latest_agent = updates::latest_component_release_version(
             &state.pool,
             &entry.row.os,
             &entry.row.arch,
             "agent",
+            &installer,
         )
         .await?;
         let latest_desktop = updates::latest_component_release_version(
@@ -775,6 +787,7 @@ async fn request_all_agent_updates(
             &entry.row.os,
             &entry.row.arch,
             "desktop",
+            &installer,
         )
         .await?;
         let latest_proxmox = updates::latest_component_release_version(
@@ -782,6 +795,7 @@ async fn request_all_agent_updates(
             &entry.row.os,
             &entry.row.arch,
             "proxmox",
+            &installer,
         )
         .await?;
         let agent_outdated = updates::component_is_outdated(

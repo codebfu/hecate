@@ -106,8 +106,16 @@ pub async fn installable_helpers_for_machine(
     desktop_version: Option<&str>,
     proxmox_version: Option<&str>,
 ) -> ApiResult<Vec<Value>> {
-    let latest_desktop = latest_component_release_version(pool, os, arch, "desktop").await?;
-    let latest_proxmox = latest_component_release_version(pool, os, arch, "proxmox").await?;
+    let tags: Vec<String> = sqlx::query_scalar("SELECT tags FROM machines WHERE id = $1")
+        .bind(machine_id)
+        .fetch_optional(pool)
+        .await?
+        .unwrap_or_default();
+    let installer = crate::updates::installer_type_for_machine(os, &tags, None);
+    let latest_desktop =
+        latest_component_release_version(pool, os, arch, "desktop", &installer).await?;
+    let latest_proxmox =
+        latest_component_release_version(pool, os, arch, "proxmox", &installer).await?;
     let pending = pending_install_component(pool, machine_id).await?;
     Ok(installable_helpers(
         agent_state,
@@ -173,17 +181,20 @@ pub async fn ensure_can_install(
     if has_pending_agent_update(pool, machine_id).await? {
         return Err(ApiError::Conflict("a package update is already queued".into()));
     }
+    let installer =
+        crate::updates::installer_type_for_machine(&machine.os, &machine.tags, None);
     let release = crate::feature_repo::releases::get_pinned_release(
         pool,
         component,
         &machine.os,
         &machine.arch,
+        &installer,
     )
     .await?;
     match release {
         None => {
             return Err(ApiError::BadRequest(format!(
-                "no {component} helper package is available for {}/{} (install/pin the feature first)",
+                "no {component} helper package is available for {}/{} ({installer}; install/pin the feature first)",
                 machine.os, machine.arch
             )));
         }
