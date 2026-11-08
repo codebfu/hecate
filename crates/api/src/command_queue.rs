@@ -221,8 +221,10 @@ pub async fn cancel_queued_command(
     actor: &str,
     include_pending_approval: bool,
 ) -> ApiResult<()> {
-    // Admin/operator cancel may force-clear in-flight work (dispatched/running) when an
-    // agent dies or stalls after claim. Identity cancel remains limited to queued only.
+    // Admin/operator cancel may force-clear in-flight work (dispatched/running). The agent
+    // learns about cancel_requested_at via heartbeat and kills the local process.
+    // Identity-facing cancel (include_pending_approval=false) still covers queued + in-flight
+    // for the caller's own command; pending_approval stays admin/operator-only.
     let updated = if include_pending_approval {
         sqlx::query(
             "UPDATE command_queue
@@ -243,7 +245,8 @@ pub async fn cancel_queued_command(
                  cancel_requested_at = now(),
                  finished_at = COALESCE(finished_at, now()),
                  reboot_phase = NULL
-             WHERE id = $1 AND status = 'queued'",
+             WHERE id = $1
+               AND status IN ('queued', 'dispatched', 'running')",
         )
         .bind(command_id)
         .execute(pool)

@@ -22,6 +22,10 @@ queued → dispatched → running → completed|failed
 pending_approval → queued (after operator approval)
 ```
 
+## Cancelling in-flight work
+
+If a command is stuck (for example `docker logs -f` / long `tail`), call `cancel_command(command_id)`. Status becomes `cancelled` immediately; the agent kills the process shortly after via heartbeat. Do not wait for the original timeout.
+
 ## When to use `wait=true`
 
 Only when the caller truly needs a single blocking response. Always set `wait_timeout_secs` (max 300). Prefer async pulls with `get_command` for long-running commands.

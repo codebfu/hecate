@@ -5,7 +5,7 @@ import { findToolSpec } from "./specs.js";
 export function registerCancelCommandTool(server, client) {
     const spec = findToolSpec("cancel_command");
     server.registerTool(spec.name, {
-        description: "Cancel a command when status is queued (not after dispatch).",
+        description: "Cancel a command owned by this identity while queued, dispatched, or running. In-flight work is aborted by the agent on the next heartbeat.",
         inputSchema: z.object({
             command_id: z.string().uuid(),
         }),

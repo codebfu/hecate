@@ -2,6 +2,7 @@
 //! SPDX-License-Identifier: GPL-3.0-or-later
 
 use axum::extract::State;
+use axum::http::StatusCode;
 use axum::routing::get;
 use axum::{Json, Router};
 use axum_extra::extract::CookieJar;
@@ -21,7 +22,9 @@ pub struct VersionResponse {
 }
 
 pub fn router() -> Router<AppState> {
-    Router::new().route("/api/v1/system/version", get(version))
+    Router::new()
+        .route("/healthz", get(|| async { StatusCode::OK }))
+        .route("/api/v1/system/version", get(version))
 }
 
 async fn version(

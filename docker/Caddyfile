@@ -9,6 +9,10 @@
 	tls /etc/caddy/tls/cert.pem /etc/caddy/tls/key.pem
 	header Strict-Transport-Security "max-age=31536000; includeSubDomains"
 
+	handle /caddy-healthz {
+		respond "ok" 200
+	}
+
 	handle /mcp* {
 		reverse_proxy mcp:3100
 	}

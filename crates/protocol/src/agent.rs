@@ -78,6 +78,18 @@ pub struct HeartbeatRequest {
     pub current_command_id: Option<Uuid>,
 }
 
+/// Server reply to an agent heartbeat.
+///
+/// Older agents ignore unknown fields; newer agents kill in-flight work when
+/// `cancel_command_id` matches the command they are executing.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct HeartbeatResponse {
+    pub ok: bool,
+    /// When set, the agent must abort this command if it is still running.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancel_command_id: Option<Uuid>,
+}
+
 /// Available self-update offer for an enrolled agent (CLI `update` command).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct UpdateOfferResponse {
@@ -262,6 +274,24 @@ mod tests {
         })
         .unwrap();
         assert!(json.get("agent_id").is_none());
+    }
+
+    #[test]
+    fn heartbeat_response_cancel_is_optional() {
+        let legacy = serde_json::json!({ "ok": true });
+        let parsed: HeartbeatResponse = serde_json::from_value(legacy).unwrap();
+        assert!(parsed.ok);
+        assert!(parsed.cancel_command_id.is_none());
+
+        let id = Uuid::new_v4();
+        let with_cancel = HeartbeatResponse {
+            ok: true,
+            cancel_command_id: Some(id),
+        };
+        let json = serde_json::to_value(&with_cancel).unwrap();
+        assert_eq!(json["cancel_command_id"], id.to_string());
+        let parsed: HeartbeatResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed.cancel_command_id, Some(id));
     }
 
     #[test]

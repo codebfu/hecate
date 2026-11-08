@@ -819,7 +819,46 @@ async fn heartbeat(
     .execute(&state.pool)
     .await?;
 
-    Ok(Json(serde_json::json!({ "ok": true })))
+    let cancel_command_id =
+        cancel_command_id_for_heartbeat(&state.pool, auth.agent_id, body.current_command_id)
+            .await?;
+
+    Ok(Json(hecate_protocol::agent::HeartbeatResponse {
+        ok: true,
+        cancel_command_id,
+    }))
+}
+
+/// If the agent reports an in-flight command that was cancelled (or has a pending
+/// cancel request), echo that id so the agent can kill the local process.
+async fn cancel_command_id_for_heartbeat(
+    pool: &sqlx::PgPool,
+    machine_id: Uuid,
+    current_command_id: Option<Uuid>,
+) -> ApiResult<Option<Uuid>> {
+    let Some(command_id) = current_command_id else {
+        return Ok(None);
+    };
+    let should_cancel: bool = sqlx::query_scalar(
+        "SELECT EXISTS(
+             SELECT 1 FROM command_queue
+             WHERE id = $1
+               AND machine_id = $2
+               AND (
+                 status = 'cancelled'
+                 OR cancel_requested_at IS NOT NULL
+               )
+         )",
+    )
+    .bind(command_id)
+    .bind(machine_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(if should_cancel {
+        Some(command_id)
+    } else {
+        None
+    })
 }
 
 /// Validate an artifact_path for backup restore (must stay under jail, no traversal).
