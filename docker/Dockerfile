@@ -2,7 +2,7 @@
 
 ARG HECATE_VERSION=1.0.0
 
-FROM rust:1.93-bookworm AS rust
+FROM rust:1.98-bookworm AS rust
 ARG HECATE_VERSION
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
@@ -11,7 +11,7 @@ COPY migrations ./migrations
 RUN sed -i "s/^version = \".*\"/version = \"${HECATE_VERSION}\"/" Cargo.toml \
     && cargo build --release -p hecate-api
 
-FROM node:24-bookworm-slim AS ui
+FROM node:26-bookworm-slim AS ui
 ARG HECATE_VERSION
 WORKDIR /app/packages/ui
 COPY packages/ui/package.json packages/ui/package-lock.json ./
@@ -20,7 +20,7 @@ COPY packages/ui/ ./
 RUN sed -i "s/\"version\": \"[^\"]*\"/\"version\": \"${HECATE_VERSION}\"/" package.json \
     && npm run build
 
-FROM node:24-bookworm-slim AS mcp
+FROM node:26-bookworm-slim AS mcp
 ARG HECATE_VERSION
 WORKDIR /app/packages/mcp
 COPY packages/mcp/package.json packages/mcp/package-lock.json ./
@@ -48,7 +48,7 @@ USER hecate
 EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 
-FROM node:24-bookworm-slim AS mcp-runtime
+FROM node:26-bookworm-slim AS mcp-runtime
 WORKDIR /opt/hecate/mcp
 COPY packages/mcp/package.json packages/mcp/package-lock.json ./
 RUN npm ci --omit=dev
