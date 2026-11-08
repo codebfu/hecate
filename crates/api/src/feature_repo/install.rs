@@ -266,7 +266,8 @@ async fn apply_manifest_update_signatures(
                AND version = $3
                AND os = $4
                AND arch = $5
-               AND sha256 = $6
+               AND installer_type = $6
+               AND sha256 = $7
                AND (update_signature IS DISTINCT FROM $1)",
         )
         .bind(signature)
@@ -274,6 +275,7 @@ async fn apply_manifest_update_signatures(
         .bind(&manifest.version)
         .bind(&artifact.os)
         .bind(&artifact.arch)
+        .bind(artifact.resolved_installer_type())
         .bind(artifact.sha256.to_ascii_lowercase())
         .execute(pool)
         .await?;
@@ -645,10 +647,16 @@ async fn prepare_feature_mirror(
     config: &AppConfig,
     manifest: &FeatureManifest,
 ) -> ApiResult<()> {
-    let expected_os_arch: HashSet<(String, String)> = manifest
+    let expected_keys: HashSet<(String, String, String)> = manifest
         .artifacts
         .iter()
-        .map(|artifact| (artifact.os.clone(), artifact.arch.clone()))
+        .map(|artifact| {
+            (
+                artifact.os.clone(),
+                artifact.arch.clone(),
+                artifact.resolved_installer_type().to_string(),
+            )
+        })
         .collect();
     let expected_filenames: HashSet<(String, String, String)> = manifest
         .artifacts
@@ -668,8 +676,8 @@ async fn prepare_feature_mirror(
         })
         .collect();
 
-    let cached_rows: Vec<(String, String, String, String)> = sqlx::query_as(
-        "SELECT version, os, arch, local_path
+    let cached_rows: Vec<(String, String, String, String, String)> = sqlx::query_as(
+        "SELECT version, os, arch, installer_type, local_path
          FROM feature_artifact_cache
          WHERE feature_id = $1",
     )
@@ -677,21 +685,23 @@ async fn prepare_feature_mirror(
     .fetch_all(pool)
     .await?;
 
-    for (cached_version, os, arch, local_path) in &cached_rows {
+    for (cached_version, os, arch, installer_type, local_path) in &cached_rows {
         let keep = cached_version.as_str() == manifest.version.as_str()
-            && expected_os_arch.contains(&(os.clone(), arch.clone()));
+            && expected_keys.contains(&(os.clone(), arch.clone(), installer_type.clone()));
         if keep {
             continue;
         }
         remove_cached_artifact_files(local_path).await;
         sqlx::query(
             "DELETE FROM feature_artifact_cache
-             WHERE feature_id = $1 AND version = $2 AND os = $3 AND arch = $4",
+             WHERE feature_id = $1 AND version = $2 AND os = $3 AND arch = $4
+               AND installer_type = $5",
         )
         .bind(&manifest.id)
         .bind(cached_version)
         .bind(os)
         .bind(arch)
+        .bind(installer_type)
         .execute(pool)
         .await?;
     }
@@ -1167,12 +1177,14 @@ async fn cached_artifact_is_current(
 ) -> ApiResult<bool> {
     let row: Option<(String, String)> = sqlx::query_as(
         "SELECT sha256, local_path FROM feature_artifact_cache
-         WHERE feature_id = $1 AND version = $2 AND os = $3 AND arch = $4",
+         WHERE feature_id = $1 AND version = $2 AND os = $3 AND arch = $4
+           AND installer_type = $5",
     )
     .bind(&manifest.id)
     .bind(&manifest.version)
     .bind(&artifact.os)
     .bind(&artifact.arch)
+    .bind(artifact.resolved_installer_type())
     .fetch_optional(pool)
     .await?;
 
@@ -1212,6 +1224,7 @@ async fn write_mirrored_file(path: &Path, bytes: &[u8]) -> ApiResult<()> {
 struct StagedMirrorArtifact {
     os: String,
     arch: String,
+    installer_type: String,
     filename: String,
     sha256: String,
     update_signature: Option<String>,
@@ -1326,6 +1339,7 @@ async fn stage_mirror_artifact(
     Ok(StagedMirrorArtifact {
         os: artifact.os.clone(),
         arch: artifact.arch.clone(),
+        installer_type: artifact.resolved_installer_type().to_string(),
         filename: filename.to_string(),
         sha256: artifact.sha256.to_ascii_lowercase(),
         update_signature: artifact
@@ -1374,9 +1388,9 @@ async fn promote_staged_artifact(pool: &PgPool, manifest: &FeatureManifest, stag
 
     sqlx::query(
         "INSERT INTO feature_artifact_cache
-            (feature_id, version, os, arch, filename, sha256, local_path, update_signature)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-         ON CONFLICT (feature_id, version, os, arch) DO UPDATE
+            (feature_id, version, os, arch, installer_type, filename, sha256, local_path, update_signature)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+         ON CONFLICT (feature_id, version, os, arch, installer_type) DO UPDATE
          SET filename = EXCLUDED.filename,
              sha256 = EXCLUDED.sha256,
              local_path = EXCLUDED.local_path,
@@ -1390,6 +1404,7 @@ async fn promote_staged_artifact(pool: &PgPool, manifest: &FeatureManifest, stag
     .bind(&manifest.version)
     .bind(&staged.os)
     .bind(&staged.arch)
+    .bind(&staged.installer_type)
     .bind(&staged.filename)
     .bind(&staged.sha256)
     .bind(staged.final_payload.to_string_lossy().to_string())

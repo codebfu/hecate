@@ -15,6 +15,8 @@ services:
       - pgdata:/var/lib/postgresql/data
     networks:
       - internal
+    labels:
+      - autoheal=true
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U hecate -d hecate"]
       interval: 5s
@@ -48,12 +50,21 @@ services:
     networks:
       - internal
       - frontend
+    labels:
+      - autoheal=true
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
     restart: unless-stopped
 
   mcp:
     image: ${HECATE_MCP_IMAGE:-ghcr.io/codebfu/hecate-mcp:1.1.7}
     depends_on:
-      - api
+      api:
+        condition: service_healthy
     environment:
       MCP_HOST: 0.0.0.0
       MCP_PORT: "3100"
@@ -66,14 +77,30 @@ services:
       - "${MCP_BIND_ADDR:-127.0.0.1}:${MCP_PORT:-3100}:3100"
     networks:
       - frontend
+    labels:
+      - autoheal=true
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3100/health').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
     restart: unless-stopped
 
   caddy:
     image: caddy:2-alpine
     profiles: ["proxy"]
     depends_on:
-      - api
-      - mcp
+      api:
+        condition: service_healthy
+      mcp:
+        condition: service_healthy
     ports:
       - "${HTTPS_PORT:-443}:443"
     volumes:
@@ -81,7 +108,31 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
     networks:
       - frontend
+    labels:
+      - autoheal=true
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "--spider",
+          "-q",
+          "--no-check-certificate",
+          "https://127.0.0.1/caddy-healthz",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
     restart: unless-stopped
+
+  autoheal:
+    image: willfarrell/autoheal:1.2.0
+    restart: unless-stopped
+    environment:
+      AUTOHEAL_CONTAINER_LABEL: autoheal
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
 
 networks:
   internal:

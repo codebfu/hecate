@@ -463,6 +463,7 @@ async fn get_update_offer(
             &body.agent_version,
             body.desktop_version.as_deref(),
             body.proxmox_version.as_deref(),
+            body.preferred_installer.as_deref(),
         )
         .await?,
     ))
@@ -537,14 +538,15 @@ async fn download_feature_artifact(
         return Err(ApiError::Forbidden);
     }
 
-    let machine: Option<(String, String)> =
-        sqlx::query_as("SELECT os, arch FROM machines WHERE id = $1")
+    let machine: Option<(String, String, Vec<String>)> =
+        sqlx::query_as("SELECT os, arch, tags FROM machines WHERE id = $1")
             .bind(auth.agent_id)
             .fetch_optional(&state.pool)
             .await?;
-    let Some((os, arch)) = machine else {
+    let Some((os, arch, tags)) = machine else {
         return Err(ApiError::NotFound);
     };
+    let installer = crate::updates::installer_type_for_machine(&os, &tags, None);
 
     let Some(release) = crate::feature_repo::releases::get_pinned_release_for_download(
         &state.pool,
@@ -552,6 +554,7 @@ async fn download_feature_artifact(
         &os,
         &arch,
         version,
+        &installer,
     )
     .await?
     else {
@@ -816,7 +819,46 @@ async fn heartbeat(
     .execute(&state.pool)
     .await?;
 
-    Ok(Json(serde_json::json!({ "ok": true })))
+    let cancel_command_id =
+        cancel_command_id_for_heartbeat(&state.pool, auth.agent_id, body.current_command_id)
+            .await?;
+
+    Ok(Json(hecate_protocol::agent::HeartbeatResponse {
+        ok: true,
+        cancel_command_id,
+    }))
+}
+
+/// If the agent reports an in-flight command that was cancelled (or has a pending
+/// cancel request), echo that id so the agent can kill the local process.
+async fn cancel_command_id_for_heartbeat(
+    pool: &sqlx::PgPool,
+    machine_id: Uuid,
+    current_command_id: Option<Uuid>,
+) -> ApiResult<Option<Uuid>> {
+    let Some(command_id) = current_command_id else {
+        return Ok(None);
+    };
+    let should_cancel: bool = sqlx::query_scalar(
+        "SELECT EXISTS(
+             SELECT 1 FROM command_queue
+             WHERE id = $1
+               AND machine_id = $2
+               AND (
+                 status = 'cancelled'
+                 OR cancel_requested_at IS NOT NULL
+               )
+         )",
+    )
+    .bind(command_id)
+    .bind(machine_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(if should_cancel {
+        Some(command_id)
+    } else {
+        None
+    })
 }
 
 /// Validate an artifact_path for backup restore (must stay under jail, no traversal).

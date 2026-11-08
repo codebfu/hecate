@@ -57,9 +57,16 @@ async fn load_pending_release(
     feature_id: &str,
     os: &str,
     arch: &str,
+    installer_type: &str,
 ) -> ApiResult<Option<PendingRelease>> {
-    let Some(release) =
-        crate::feature_repo::releases::get_pinned_release(pool, feature_id, os, arch).await?
+    let Some(release) = crate::feature_repo::releases::get_pinned_release(
+        pool,
+        feature_id,
+        os,
+        arch,
+        installer_type,
+    )
+    .await?
     else {
         return Ok(None);
     };
@@ -282,17 +289,18 @@ pub async fn build_update_offer_response(
     agent_version: &str,
     desktop_version: Option<&str>,
     proxmox_version: Option<&str>,
+    preferred_installer: Option<&str>,
 ) -> ApiResult<hecate_protocol::agent::UpdateOfferResponse> {
     use hecate_protocol::agent::UpdateOfferResponse;
 
-    let machine: Option<(String, String, Option<String>)> = sqlx::query_as(
-        "SELECT os, arch, agent_version FROM machines WHERE id = $1",
+    let machine: Option<(String, String, Option<String>, Vec<String>)> = sqlx::query_as(
+        "SELECT os, arch, agent_version, tags FROM machines WHERE id = $1",
     )
     .bind(machine_id)
     .fetch_optional(pool)
     .await?;
 
-    let Some((os, arch, reported_version)) = machine else {
+    let Some((os, arch, reported_version, tags)) = machine else {
         return Ok(empty_offer(agent_version, Some("machine not found".into())));
     };
 
@@ -311,10 +319,13 @@ pub async fn build_update_offer_response(
         ));
     }
 
+    let installer =
+        crate::updates::installer_type_for_machine(&os, &tags, preferred_installer);
+
     // Fleet package offers come from installed feature-repo pins + mirrored artifacts.
-    let agent_release = load_pending_release(pool, "agent", &os, &arch).await?;
-    let desktop_release = load_pending_release(pool, "desktop", &os, &arch).await?;
-    let proxmox_release = load_pending_release(pool, "proxmox", &os, &arch).await?;
+    let agent_release = load_pending_release(pool, "agent", &os, &arch, &installer).await?;
+    let desktop_release = load_pending_release(pool, "desktop", &os, &arch, &installer).await?;
+    let proxmox_release = load_pending_release(pool, "proxmox", &os, &arch, &installer).await?;
 
     let resolved_key =
         crate::server_settings::resolve_release_signing_public_key_b64(pool, config).await?;

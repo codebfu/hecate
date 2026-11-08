@@ -3,11 +3,12 @@
 
 //! Public bootstrap downloads for the latest pinned feature-repo installers.
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
+use serde::Deserialize;
 
 use crate::error::{ApiError, ApiResult};
 use crate::feature_repo::releases;
@@ -20,16 +21,32 @@ pub fn router() -> Router<AppState> {
     )
 }
 
+#[derive(Debug, Deserialize)]
+struct LatestReleaseQuery {
+    /// Optional installer preference (`deb`, `rpm`, `msi`, `pkg`). Defaults by OS.
+    #[serde(default)]
+    installer_type: Option<String>,
+}
+
 async fn download_latest_release(
     State(state): State<AppState>,
     Path((os, arch, component)): Path<(String, String, String)>,
+    Query(query): Query<LatestReleaseQuery>,
 ) -> ApiResult<Response> {
     releases::validate_release_path_segment("os", &os)?;
     releases::validate_release_path_segment("arch", &arch)?;
     releases::validate_release_path_segment("component", &component)?;
 
-    let Some(release) =
-        releases::get_latest_release_artifact(&state.pool, &os, &arch, &component).await?
+    let installer = releases::resolve_installer_type(&os, query.installer_type.as_deref(), &[]);
+
+    let Some(release) = releases::get_latest_release_artifact(
+        &state.pool,
+        &os,
+        &arch,
+        &component,
+        &installer,
+    )
+    .await?
     else {
         return Err(ApiError::NotFound);
     };
@@ -65,6 +82,12 @@ async fn download_latest_release(
         header::HeaderName::from_static("x-hecate-release-sha256"),
         HeaderValue::from_str(&release.sha256).map_err(|error| {
             ApiError::Internal(anyhow::anyhow!("release sha256 header: {error}"))
+        })?,
+    );
+    headers.insert(
+        header::HeaderName::from_static("x-hecate-installer-type"),
+        HeaderValue::from_str(&release.installer_type).map_err(|error| {
+            ApiError::Internal(anyhow::anyhow!("installer type header: {error}"))
         })?,
     );
 

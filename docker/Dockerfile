@@ -31,7 +31,7 @@ RUN sed -i "s/\"version\": \"[^\"]*\"/\"version\": \"${HECATE_VERSION}\"/" packa
 
 FROM debian:bookworm-slim AS runtime
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd -g 1000 hecate \
     && useradd -u 1000 -g hecate -m -s /usr/sbin/nologin hecate

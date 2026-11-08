@@ -77,8 +77,25 @@ pub async fn latest_component_release_version(
     os: &str,
     arch: &str,
     component: &str,
+    installer_type: &str,
 ) -> ApiResult<Option<String>> {
-    crate::feature_repo::releases::latest_component_version(pool, os, arch, component).await
+    crate::feature_repo::releases::latest_component_version(
+        pool,
+        os,
+        arch,
+        component,
+        installer_type,
+    )
+    .await
+}
+
+/// Resolve installer type for a machine from OS + agent tags (+ optional preferred).
+pub fn installer_type_for_machine(
+    os: &str,
+    tags: &[String],
+    preferred: Option<&str>,
+) -> String {
+    crate::feature_repo::releases::resolve_installer_type(os, preferred, tags)
 }
 
 /// True when a reported version is older than a known latest release.
@@ -266,9 +283,18 @@ pub async fn machine_update_extra(
         crate::helper_install::pending_install_component(pool, machine_id).await?;
     let pending_package_update = has_pending_update && pending_install.is_none();
     let blocked_by_other_commands = has_other_active_commands(pool, machine_id).await?;
-    let latest_agent = latest_component_release_version(pool, os, arch, "agent").await?;
-    let latest_desktop = latest_component_release_version(pool, os, arch, "desktop").await?;
-    let latest_proxmox = latest_component_release_version(pool, os, arch, "proxmox").await?;
+    let tags: Vec<String> = sqlx::query_scalar("SELECT tags FROM machines WHERE id = $1")
+        .bind(machine_id)
+        .fetch_optional(pool)
+        .await?
+        .unwrap_or_default();
+    let installer = installer_type_for_machine(os, &tags, None);
+    let latest_agent =
+        latest_component_release_version(pool, os, arch, "agent", &installer).await?;
+    let latest_desktop =
+        latest_component_release_version(pool, os, arch, "desktop", &installer).await?;
+    let latest_proxmox =
+        latest_component_release_version(pool, os, arch, "proxmox", &installer).await?;
     let agent_status = compute_agent_update_status(
         agent_state,
         agent_version,

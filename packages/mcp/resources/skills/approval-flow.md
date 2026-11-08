@@ -22,7 +22,7 @@ Approval or execution may expire on timeout. Status becomes `expired`.
 
 ## cancelled
 
-Operators or your identity may cancel queued commands before dispatch. Admins may also force-cancel `dispatched` / `running` commands stuck in the fleet action queue. Use `list_commands` to inspect history if needed.
+Use `cancel_command` for your own `queued`, `dispatched`, or `running` commands. The agent aborts in-flight work on the next heartbeat (kills the local process for `shell.run`). Admins may also force-cancel any identity's in-flight commands via the action queue. Use `list_commands` to inspect history if needed.
 
 ## Admin queue tools
 

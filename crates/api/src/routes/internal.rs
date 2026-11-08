@@ -655,9 +655,17 @@ async fn cancel_command(
     Path(id): Path<Uuid>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let identity_id = verify_internal_token(&state, &headers).await?;
+    // Identity may cancel its own queued work and also request abort of in-flight
+    // (dispatched/running) commands so the agent can kill the local process via heartbeat.
     let updated = sqlx::query(
-        "UPDATE command_queue SET status = 'cancelled', cancel_requested_at = now()
-         WHERE id = $1 AND ai_identity_id = $2 AND status IN ('queued')",
+        "UPDATE command_queue
+         SET status = 'cancelled',
+             cancel_requested_at = now(),
+             finished_at = COALESCE(finished_at, now()),
+             reboot_phase = NULL
+         WHERE id = $1
+           AND ai_identity_id = $2
+           AND status IN ('queued', 'dispatched', 'running')",
     )
     .bind(id)
     .bind(identity_id)

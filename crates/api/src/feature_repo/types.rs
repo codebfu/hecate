@@ -178,10 +178,39 @@ pub struct FeatureArtifact {
     pub sha256: String,
     #[serde(default, alias = "path")]
     pub url: Option<String>,
+    /// Installer format (`deb`, `msi`, `pkg`, `rpm`, `raw`). Empty → infer from filename.
+    #[serde(default)]
+    pub installer_type: String,
     /// Optional canonical self-update signature (base64) for fleet agents that
     /// only verify the legacy `v1\\n{kind}\\n{version}\\n{sha256}\\n{sha256}` message.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub update_signature: Option<String>,
+}
+
+impl FeatureArtifact {
+    /// Resolved installer type: explicit field, else filename extension, else `raw`.
+    pub fn resolved_installer_type(&self) -> &str {
+        let trimmed = self.installer_type.trim();
+        if !trimmed.is_empty() {
+            return trimmed;
+        }
+        infer_installer_type_from_filename(&self.filename)
+    }
+}
+
+pub fn infer_installer_type_from_filename(filename: &str) -> &'static str {
+    let lower = filename.to_ascii_lowercase();
+    if lower.ends_with(".deb") {
+        "deb"
+    } else if lower.ends_with(".rpm") {
+        "rpm"
+    } else if lower.ends_with(".msi") {
+        "msi"
+    } else if lower.ends_with(".pkg") {
+        "pkg"
+    } else {
+        "raw"
+    }
 }
 
 #[cfg(test)]
