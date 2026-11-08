@@ -706,6 +706,11 @@ async fn prepare_feature_mirror(
         .await?;
     }
 
+    let expected_os_arch: HashSet<(String, String)> = expected_keys
+        .iter()
+        .map(|(os, arch, _installer)| (os.clone(), arch.clone()))
+        .collect();
+
     prune_feature_mirror_tree(
         &config.hecate_repo_mirror_dir.join(&manifest.id),
         &manifest.version,

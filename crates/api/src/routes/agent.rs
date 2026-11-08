@@ -823,10 +823,11 @@ async fn heartbeat(
         cancel_command_id_for_heartbeat(&state.pool, auth.agent_id, body.current_command_id)
             .await?;
 
-    Ok(Json(hecate_protocol::agent::HeartbeatResponse {
-        ok: true,
-        cancel_command_id,
-    }))
+    let mut response = serde_json::json!({ "ok": true });
+    if let Some(id) = cancel_command_id {
+        response["cancel_command_id"] = serde_json::json!(id);
+    }
+    Ok(Json(response))
 }
 
 /// If the agent reports an in-flight command that was cancelled (or has a pending
