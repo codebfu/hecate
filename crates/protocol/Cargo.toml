@@ -11,7 +11,7 @@ serde_json = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 thiserror = { workspace = true }
-sha2 = "0.10"
+sha2 = "0.11"
 url = "2"
 hecate-lampad-helper-base = { git = "https://github.com/codebfu/hecate-lampad-helper-base.git", rev = "a993e1060ae88dad8dc144b59d820341ae881172", default-features = false }
 
